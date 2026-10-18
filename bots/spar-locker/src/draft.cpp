@@ -40,9 +40,7 @@ static void dump_map() {
 
 void play_draft() {
     using cambc::champion_draft;
-#ifdef SPAR_MAPDUMP
-    dump_map();
-#endif
+
     static constexpr std::array order{
         champion_draft::cassi_and_issac, champion_draft::stellar, champion_draft::ren,
         champion_draft::varg, champion_draft::ryth, champion_draft::tavi,
@@ -52,7 +50,10 @@ void play_draft() {
     cambc::draft_memory = std::string_view("SPAR1");
     for (auto pick : order) {
         if (std::find(ours.begin(), ours.end(), pick) == ours.end()) {
-            cambc::draft::pick(pick);
+            cambc::draft::pick(pick);  // pick first: running out of draft fuel means random picks
+#ifdef SPAR_MAPDUMP
+            dump_map();
+#endif
             return;
         }
     }

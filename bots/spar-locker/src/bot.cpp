@@ -6,8 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdio>
 #include <span>
+#include "out.h"
 #include <variant>
 
 using cambc::team;
@@ -138,9 +138,9 @@ void Bot::init() {
         if (!patrol.empty()) patrol_idx = slot % static_cast<int>(patrol.size());
     }
 
-    std::printf("init slot=%d champ=%d role=%d groups=%d altars=%d fuel=%llu\n", slot, static_cast<int>(kind),
-                static_cast<int>(role), static_cast<int>(groups.size()), static_cast<int>(altars.size()),
-                static_cast<unsigned long long>(cambc::fuel_remaining()));
+    out::s("init"); out::kv("slot", slot); out::kv("champ", static_cast<int>(kind)); out::kv("role", static_cast<int>(role));
+    out::kv("groups", static_cast<int>(groups.size())); out::kv("altars", static_cast<int>(altars.size()));
+    out::kv("fuel", static_cast<long long>(cambc::fuel_remaining())); out::nl();
 }
 
 void Bot::telemetry(std::uint64_t fuel_min) {
@@ -150,11 +150,12 @@ void Bot::telemetry(std::uint64_t fuel_min) {
         auto& me = cambc::self();
         if (me.is_alive()) { gems = me.gem_count(); p = me.position(); }
     } catch (...) {}
-    std::printf("T r=%u slot=%d fmin=%llu gems=%u banked=%u pos=%d,%d tgt=%d role=%d hp=%.0f ph=%llu/%llu/%llu/%llu\n",
-                static_cast<unsigned>(cambc::round_number()), slot, static_cast<unsigned long long>(fuel_min), gems,
-                static_cast<unsigned>(cambc::global_submitted_gems(team::ally)), p.x, p.y, target, static_cast<int>(role), hp,
-                static_cast<unsigned long long>(probe_max[0]), static_cast<unsigned long long>(probe_max[1]),
-                static_cast<unsigned long long>(probe_max[2]), static_cast<unsigned long long>(probe_max[3]));
+    out::s("T"); out::kv("r", cambc::round_number()); out::kv("slot", slot); out::kv("fmin", static_cast<long long>(fuel_min));
+    out::kv("gems", gems); out::kv("banked", cambc::global_submitted_gems(team::ally));
+    out::s(" pos="); out::i(p.x); out::s(","); out::i(p.y); out::kv("tgt", target); out::kv("role", static_cast<int>(role));
+    out::kv("hp", static_cast<long long>(hp));
+    out::s(" ph="); out::i(static_cast<long long>(probe_max[0])); out::s("/"); out::i(static_cast<long long>(probe_max[1]));
+    out::s("/"); out::i(static_cast<long long>(probe_max[2])); out::s("/"); out::i(static_cast<long long>(probe_max[3])); out::nl();
     for (auto& v : probe_max) v = 0;
 }
 
@@ -248,15 +249,15 @@ bool Bot::step_towards(const cambc::bitboard& goals_in) {
     std::sort(cand.begin(), cand.begin() + n, [](const auto& a, const auto& b) { return a.first < b.first; });
 #ifdef SPAR_TRACE
     if (slot == 0 && round >= 100 && round < 106) {
-        std::printf("trace r=%u pos=%d,%d here=%u n=%d:", (unsigned)round, pos.x, pos.y, (unsigned)here, n);
-        for (int i = 0; i < n; ++i) std::printf(" (%d,%d)=%u", cand[i].second.x, cand[i].second.y, (unsigned)cand[i].first);
-        std::printf(" goals=%u tgt=%d\n", goals.count(), target);
+        out::s("trace"); out::kv("r", round); out::s(" pos="); out::v(pos); out::kv("here", here); out::kv("n", n);
+        for (int i = 0; i < n; ++i) { out::s(" "); out::v(cand[i].second); out::s("="); out::i(cand[i].first); }
+        out::kv("goals", goals.count()); out::kv("tgt", target); out::nl();
     }
 #endif
     for (int i = 0; i < n && i < 3; ++i) {
         if (me.move_absolute(cand[i].second)) { pos = cand[i].second; return true; }  // false = hidden blocker; try the next
 #ifdef SPAR_TRACE
-        std::printf("movefalse r=%u slot=%d to=%d,%d canmove_after=%d\n", (unsigned)round, slot, cand[i].second.x, cand[i].second.y, (int)me.can_move());
+        out::s("movefalse"); out::kv("r", round); out::kv("slot", slot); out::s(" to="); out::v(cand[i].second); out::kv("canmove_after", me.can_move()); out::nl();
 #endif
     }
     return false;
@@ -280,6 +281,12 @@ bool Bot::step_away_from(const std::vector<vec2>& threats) {
     if (best == pos || !me.move_absolute(best)) return false;
     pos = best;
     return true;
+}
+
+bool Bot::altar_locked_by(vec2 altar, team side) const {
+    for (const auto& lock : cambc::vision::altar_locks(side))
+        if (cheb(lock.position(), altar) <= 2) return true;
+    return false;
 }
 
 bool Bot::enemy_within(int range) const {
@@ -462,7 +469,7 @@ bool Bot::bank_gems(bool force) {
     vec2 best{-1, -1};
     int best_d = 1 << 30;
     for (auto a : altars) {
-        if (cambc::vision::has_altar_lock(a) && cambc::vision::altar_lock_at(a).is_enemy()) continue;
+        if (altar_locked_by(a, team::enemy)) continue;
         const int d = cheb(a, pos);
         if (d < best_d) { best_d = d; best = a; }
     }
@@ -592,11 +599,12 @@ void Bot::act_on_target() {
         }
         return;
     }
-    const auto state = g.group.state();
+    cambc::map::camp_group_state state;
+    try { state = g.group.state(); } catch (...) { step_towards(g.spawns); return; }
     if (std::holds_alternative<cambc::map::camp_group_respawning>(state)) {
 #ifdef SPAR_TRACE
-        std::printf("cap r=%u slot=%d group=%d respawning timer=%d gems=%u on_tile=%d\n", (unsigned)round, slot, target,
-                    std::get<cambc::map::camp_group_respawning>(state).timer, me.gem_count(), (int)g.spawns.is_set(pos));
+        out::s("cap"); out::kv("r", round); out::kv("slot", slot); out::kv("group", target); out::s(" respawning");
+        out::kv("timer", std::get<cambc::map::camp_group_respawning>(state).timer); out::kv("gems", me.gem_count()); out::kv("on_tile", g.spawns.is_set(pos)); out::nl();
 #endif
         g.blocked_until = round + std::get<cambc::map::camp_group_respawning>(state).timer + 1;
         target = -1;
@@ -606,7 +614,8 @@ void Bot::act_on_target() {
     if (std::holds_alternative<cambc::map::camp_group_reward_available>(state)) {
         // Capture: stand on a spawn tile until the reward arrives (state flips to respawning).
 #ifdef SPAR_TRACE
-        std::printf("cap r=%u slot=%d group=%d reward_available gems=%u on_tile=%d\n", (unsigned)round, slot, target, me.gem_count(), (int)g.spawns.is_set(pos));
+        out::s("cap"); out::kv("r", round); out::kv("slot", slot); out::kv("group", target); out::s(" reward_available");
+        out::kv("gems", me.gem_count()); out::kv("on_tile", g.spawns.is_set(pos)); out::nl();
 #endif
         if (g.spawns.is_set(pos)) return;
         // An ally already standing on the region captures it; splitting only delays banking.
@@ -743,14 +752,15 @@ void Bot::do_hunt() {
     const cambc::champion* victim = nullptr;
     int victim_score = -1;
     for (const auto& e : enemies) {
-        if (e.health() <= 0) continue;
+        if (safe_hp(e) <= 0) continue;
+        const auto ep = safe_pos(e);
         int score = 0;
         try {
             if (e.is_submitting_gems()) score += 1000;
             score += static_cast<int>(e.gem_count()) * 5;
         } catch (...) {}
-        score -= cheb(e.position(), pos);
-        if (cheb(e.position(), pos) <= me.attack_range() + 1) score += 20;
+        score -= cheb(ep, pos);
+        if (cheb(ep, pos) <= me.attack_range() + 1) score += 20;
         if (score > victim_score) { victim_score = score; victim = &e; }
     }
     if (victim) {
@@ -803,19 +813,18 @@ void Bot::do_lock() {
     auto& me = cambc::self();
     if (lock_altar.x < 0) { do_farm(); return; }
     const bool have_lock = me.consumables()[cambc::consumable_type::altar_lock].count() > 0;
-    bool ours_placed = false, enemy_lock = false;
-    if (cambc::vision::has_altar_lock(lock_altar)) {
-        const auto lock = cambc::vision::altar_lock_at(lock_altar);
-        ours_placed = lock.is_ally();
-        enemy_lock = lock.is_enemy();
-    }
+    // Locks are only reported while the altar tile is in sight; remember ours otherwise.
+    const bool altar_visible = visible.is_set(lock_altar);
+    if (altar_visible) our_lock_seen = altar_locked_by(lock_altar, team::ally);
+    const bool ours_placed = our_lock_seen;
+    const bool enemy_lock = altar_visible && altar_locked_by(lock_altar, team::enemy);
     if (want_recall(RECALL_FRACTION)) return;
 
     // Enemies near the altar (or us) get hit; prefer the ones adjacent to the altar (hitting the lock).
     const cambc::champion* victim = nullptr;
     int victim_score = -1;
     for (const auto& e : enemies) {
-        if (e.health() <= 0) continue;
+        if (safe_hp(e) <= 0) continue;
         int score = 100 - cheb(e.position(), pos);
         if (cheb(e.position(), lock_altar) <= 1) score += 50;
         if (score > victim_score) { victim_score = score; victim = &e; }
@@ -848,17 +857,25 @@ void Bot::do_lock() {
     }
     if (enemy_lock) {
         // Break the enemy lock (3 basic attacks), then place ours.
-        if (cheb(pos, lock_altar) <= me.attack_range() && me.can_attack()) {
-            me.attack(cambc::vision::altar_lock_at(lock_altar));
-            try_reset_and_attack(nullptr);
+        const cambc::altar_lock* target_lock = nullptr;
+        const auto locks = cambc::vision::altar_locks(team::enemy);
+        for (const auto& lock : locks)
+            if (cheb(lock.position(), lock_altar) <= 2 && cheb(lock.position(), pos) <= me.attack_range()) target_lock = &lock;
+        if (target_lock && me.can_attack()) {
+            me.attack(*target_lock);
         } else {
             step_towards(ring(lock_altar, me.attack_range()));
         }
         return;
     }
     if (have_lock && !ours_placed) {
+        if (!altar_visible) { step_towards(ring(lock_altar, 1)); return; }  // get eyes on it before placing
         if (me.consumables()[cambc::consumable_type::altar_lock].use(lock_altar)) {
-            std::printf("lock placed r=%u at (%d,%d)\n", static_cast<unsigned>(round), lock_altar.x, lock_altar.y);
+            const auto locks = cambc::vision::altar_locks(team::ally);
+            const vec2 at = locks.empty() ? vec2{-1, -1} : locks.back().position();
+            out::s("lock placed"); out::kv("r", round); out::s(" altar="); out::v(lock_altar); out::s(" lock_at="); out::v(at);
+            out::s(" me="); out::v(pos); out::nl();
+            our_lock_seen = true;
         }
         return;
     }
@@ -880,8 +897,7 @@ void Bot::do_lock() {
 void Bot::play_turn() {
     if (!inited) {
         init();
-        // The first turn's doubled budget mostly went into init; do not stack a full turn on it.
-        if (cambc::fuel_remaining() < 60000) return;
+        return;  // the first turn's doubled budget is for init only (42-group maps leave ~75k after it)
     }
     auto& me = cambc::self();
     round = cambc::round_number();

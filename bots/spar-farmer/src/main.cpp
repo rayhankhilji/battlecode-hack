@@ -3,10 +3,10 @@
 // fuel suspension made the round counter skip between two loop iterations.
 #include <cambc.h>
 #include <cstdint>
-#include <cstdio>
 #include <exception>
 #include "bot.h"
 #include "draft.h"
+#include "out.h"
 
 int main() {
     Bot bot;
@@ -19,8 +19,7 @@ int main() {
                 play_draft();
             } else {
                 const auto round = cambc::round_number();
-                if (have_round && round > last_round + 1)
-                    std::printf("SUSPENDED r=%u\n", static_cast<unsigned>(round));
+                if (have_round && round > last_round + 1) { out::s("SUSPENDED r="); out::i(round); out::nl(); }
                 have_round = true;
                 last_round = round;
                 bot.play_turn();
@@ -32,10 +31,11 @@ int main() {
                 }
             }
         } catch (const std::exception& error) {
-            std::printf("bot error r=%u: %s\n", static_cast<unsigned>(cambc::round_number()), error.what());
+            out::s("bot error r="); out::i(cambc::round_number()); out::s(": "); out::s(error.what()); out::nl();
         } catch (...) {
-            std::printf("bot error: unknown exception\n");
+            out::s("bot error: unknown exception\n");
         }
+        out::flush();
         cambc::end_turn();
     }
 }

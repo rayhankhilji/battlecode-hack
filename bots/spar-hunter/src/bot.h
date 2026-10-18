@@ -46,6 +46,7 @@ private:
     bool chasing = false;
     // locker
     cambc::vec2 lock_altar{-1, -1};
+    bool our_lock_seen = false;   // last known state of our lock when the altar tile was visible
 
     // fuel probes: max fuel consumed per phase in the current telemetry window
     std::uint64_t probe_last = 0;
@@ -79,6 +80,8 @@ private:
     bool step_away_from(const std::vector<cambc::vec2>& threats);
     bool want_recall(float fraction);
     bool enemy_within(int range) const;
+    // Is there a lock of `side` within 2 tiles of this altar (locks are recorded on their own tile)?
+    bool altar_locked_by(cambc::vec2 altar, cambc::team side) const;
     bool awake_camp_within(int range) const;
 
     // combat
