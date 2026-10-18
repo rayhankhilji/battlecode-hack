@@ -1,0 +1,20 @@
+[
+  {
+    "command": "/root/.cache/cambc/wasi-sdk-33/bin/clang++ --target=wasm32-wasip1 --sysroot=/root/.cache/cambc/wasi-sdk-33/share/wasi-sysroot -DCAMBC_DEBUG -I/home/user/battlecode-hack/sdk/cpp -isystem /root/.cache/cambc/wasi-sdk-33/share/cmake/../../share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1 -O3 -DNDEBUG -std=c++20 -msimd128 -mbulk-memory -mbulk-memory-opt -fwasm-exceptions -mllvm -wasm-use-legacy-eh=false -o CMakeFiles/bot.dir/home/user/battlecode-hack/bots/spar-farmer/src/bot.cpp.obj -c /home/user/battlecode-hack/bots/spar-farmer/src/bot.cpp --sysroot=\"/root/.cache/cambc/wasi-sdk-33/share/wasi-sysroot\" -isystem \"/root/.cache/cambc/wasi-sdk-33/share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1\"",
+    "directory": "/home/user/battlecode-hack/bots/spar-farmer/.cambc/build",
+    "file": "/home/user/battlecode-hack/bots/spar-farmer/src/bot.cpp",
+    "output": "CMakeFiles/bot.dir/home/user/battlecode-hack/bots/spar-farmer/src/bot.cpp.obj"
+  },
+  {
+    "command": "/root/.cache/cambc/wasi-sdk-33/bin/clang++ --target=wasm32-wasip1 --sysroot=/root/.cache/cambc/wasi-sdk-33/share/wasi-sysroot -DCAMBC_DEBUG -I/home/user/battlecode-hack/sdk/cpp -isystem /root/.cache/cambc/wasi-sdk-33/share/cmake/../../share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1 -O3 -DNDEBUG -std=c++20 -msimd128 -mbulk-memory -mbulk-memory-opt -fwasm-exceptions -mllvm -wasm-use-legacy-eh=false -o CMakeFiles/bot.dir/home/user/battlecode-hack/bots/spar-farmer/src/draft.cpp.obj -c /home/user/battlecode-hack/bots/spar-farmer/src/draft.cpp --sysroot=\"/root/.cache/cambc/wasi-sdk-33/share/wasi-sysroot\" -isystem \"/root/.cache/cambc/wasi-sdk-33/share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1\"",
+    "directory": "/home/user/battlecode-hack/bots/spar-farmer/.cambc/build",
+    "file": "/home/user/battlecode-hack/bots/spar-farmer/src/draft.cpp",
+    "output": "CMakeFiles/bot.dir/home/user/battlecode-hack/bots/spar-farmer/src/draft.cpp.obj"
+  },
+  {
+    "command": "/root/.cache/cambc/wasi-sdk-33/bin/clang++ --target=wasm32-wasip1 --sysroot=/root/.cache/cambc/wasi-sdk-33/share/wasi-sysroot -DCAMBC_DEBUG -I/home/user/battlecode-hack/sdk/cpp -isystem /root/.cache/cambc/wasi-sdk-33/share/cmake/../../share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1 -O3 -DNDEBUG -std=c++20 -msimd128 -mbulk-memory -mbulk-memory-opt -fwasm-exceptions -mllvm -wasm-use-legacy-eh=false -o CMakeFiles/bot.dir/home/user/battlecode-hack/bots/spar-farmer/src/main.cpp.obj -c /home/user/battlecode-hack/bots/spar-farmer/src/main.cpp --sysroot=\"/root/.cache/cambc/wasi-sdk-33/share/wasi-sysroot\" -isystem \"/root/.cache/cambc/wasi-sdk-33/share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1\"",
+    "directory": "/home/user/battlecode-hack/bots/spar-farmer/.cambc/build",
+    "file": "/home/user/battlecode-hack/bots/spar-farmer/src/main.cpp",
+    "output": "CMakeFiles/bot.dir/home/user/battlecode-hack/bots/spar-farmer/src/main.cpp.obj"
+  }
+]
