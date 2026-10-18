@@ -10,3 +10,6 @@ __pycache__/
 .venv/
 venv/
 # keep maps/ and bots/ in git
+.venv
+bots/starter-ocaml/
+bots/starter-rust/
