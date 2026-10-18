@@ -40,6 +40,7 @@ struct Known { std::uint8_t state{}; std::uint32_t round{}; std::uint32_t respaw
 
 class Bot {
 public:
+    friend struct CombatCtx; // combat.cpp
     void play_turn();
     void end_of_turn();
 

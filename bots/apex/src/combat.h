@@ -1,45 +1,46 @@
-// Combat hook: called before economy decisions every actionable turn. Trivial implementation for
-// the economy wave; the combat wave replaces the body of combat_hook().
-// Contract: returns true when the turn is fully consumed (the economy must not act).
+// Combat / denial module: threat model, carrier safety, kill-steal, fight-or-flee, kiting.
+// Called from Bot::play_turn() before the economy decisions (combat_hook) and while a tribute
+// channel is running (combat_tribute_check). All logic lives in combat.cpp; Bot grants access
+// through `friend struct CombatCtx`.
 #pragma once
 #include "bot.h"
 
 namespace apex {
 
-inline bool combat_hook(Bot& bot) {
-    World& w = bot.w;
-    if (w.enemies.empty()) return false;
-    // Retreat under lethal threat: low health with an enemy champion that can reach us.
-    if (bot.in_danger_from_champions()) {
-        if (bot.step_away_from_threats()) return true;
-    }
-    // Opportunistic basic attack on an enemy already in range (never abandons a channel: channels
-    // are handled before this hook runs). Ranged champions give up their walk by attacking.
-    if (!w.can_attack()) return false;
-    int best = -1;
-    float best_hp = 1e9f;
-    for (std::size_t i = 0; i < w.enemies.size(); ++i) {
-        if (cheb(w.enemy_pos[i], w.pos) > bot.attack_range) continue;
-        const float hp = w.enemy_hp[i];
-        if (hp <= 0) continue;
-        if (hp < best_hp) { best_hp = hp; best = static_cast<int>(i); }
-    }
-    if (best >= 0 && (!bot.ranged || best_hp <= 2.0f * w.hp)) { bot.try_attack_champion(w.enemies[best]); return false; }
-    // Ranged and hurt with an enemy close: back off towards spawn/allies instead of trading.
-    if (bot.ranged && w.hp < 0.6f * w.maxhp) {
-        for (const auto p : w.enemy_pos) if (cheb(p, w.pos) <= 3) { if (bot.step_away_from_threats()) return true; break; }
-    }
-    // Melee: punish an enemy standing close to our work when healthy; one step, then attack.
-    if (!bot.ranged && w.hp > 0.5f * w.maxhp && w.can_move()) {
-        int near = -1; int nd = 99;
-        for (std::size_t i = 0; i < w.enemies.size(); ++i) { const int d = cheb(w.enemy_pos[i], w.pos); if (d <= 3 && d < nd) { nd = d; near = static_cast<int>(i); } }
-        if (near >= 0) {
-            bitboard goals; goals.draw_chebyshev(w.enemy_pos[near], 1);
-            if (bot.step_towards(goals, false) && cheb(w.enemy_pos[near], w.pos) <= bot.attack_range && w.enemies[near].is_visible())
-                bot.try_attack_champion(w.enemies[near]);
-        }
-    }
-    return false;
-}
+struct Threat {
+    int idx{};                 // index into World::enemies
+    vec2 pos{};
+    float hp{};
+    std::uint32_t gems{};
+    float str{};               // sustained basic-attack damage per turn
+    float melee_burst{};       // basic attack damage next turn (x2 when a reset is ready)
+    float spell_burst{};       // ready damage spells next turn
+    int reach_a{};             // tiles from which the basic attack can land next turn (move + range + dash)
+    int reach_s{};             // tiles from which a spell can land next turn
+    bool stun_ready{};         // a stun can be cast next turn
+    bool submitting{};
+    bool stunned{};
+    bool ranged{};
+    champion_type type{};
+};
+
+struct ThreatModel {
+    std::vector<Threat> t;
+    // Damage that can land on `p` next turn.
+    float incoming_at(vec2 p) const;
+    // Damage over the next two turns from threats that can reach `p` within two moves.
+    float incoming2_at(vec2 p) const;
+    // Damage over `turns` turns on a champion standing still at `p` (basics every turn, one spell
+    // and one reset per enemy).
+    float sustained_at(vec2 p, int turns) const;
+    bool stun_reaches(vec2 p) const;
+    bool any_reaches(vec2 p) const { return incoming_at(p) > 0; }
+};
+
+// Returns true when the turn is fully consumed (the economy must not act).
+bool combat_hook(Bot& bot);
+// While channelling a tribute: cancels and flees when the channel cannot be survived. Returns
+// true when it acted.
+bool combat_tribute_check(Bot& bot);
 
 } // namespace apex

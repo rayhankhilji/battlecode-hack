@@ -463,7 +463,7 @@ bool Bot::recover() {
         // Spawn heals fully at turn end: one waiting turn is enough. Enemies hitting us on spawn
         // (possibly unseen, from bushes) must not keep us there forever.
         ++spawn_wait;
-        if (w.hp < 0.95f * w.maxhp && (spawn_wait <= 2 || w.hp < 0.5f * w.maxhp)) { mode = Mode::RECOVER; return true; }
+        if (w.hp < 0.95f * w.maxhp && (spawn_wait <= 2 || (w.hp < 0.5f * w.maxhp && spawn_wait <= 6))) { mode = Mode::RECOVER; return true; }
         recovering = false;
         return false;
     }
@@ -888,7 +888,7 @@ void Bot::play_turn() {
     if (!fuel_ok(FUEL_RESERVE)) return;
 
     // Channels: never issue anything that would cancel them.
-    if (w.st.contains(champion_state::submitting_gems)) { mode = Mode::TRIBUTE; write_claim(PH_DELIVER, -1); return; }
+    if (w.st.contains(champion_state::submitting_gems)) { mode = Mode::TRIBUTE; write_claim(PH_DELIVER, -1); combat_tribute_check(*this); return; }
     if (w.st.contains(champion_state::recalling) || w.st.contains(champion_state::teleporting)) { mode = Mode::RECOVER; return; }
     // Stunned or otherwise fully restricted.
     if (w.restr.contains(buff_restrictions::move) && w.restr.contains(buff_restrictions::attack)) return;
