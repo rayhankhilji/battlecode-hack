@@ -16,15 +16,29 @@ inline bool combat_hook(Bot& bot) {
     // Opportunistic basic attack on an enemy already in range (never abandons a channel: channels
     // are handled before this hook runs). Ranged champions give up their walk by attacking.
     if (!w.can_attack()) return false;
-    const cambc::champion* best = nullptr;
+    int best = -1;
     float best_hp = 1e9f;
-    for (const auto& e : w.enemies) {
-        if (cheb(e.position(), w.pos) > bot.attack_range) continue;
-        const float hp = e.health();
+    for (std::size_t i = 0; i < w.enemies.size(); ++i) {
+        if (cheb(w.enemy_pos[i], w.pos) > bot.attack_range) continue;
+        const float hp = w.enemy_hp[i];
         if (hp <= 0) continue;
-        if (hp < best_hp) { best_hp = hp; best = &e; }
+        if (hp < best_hp) { best_hp = hp; best = static_cast<int>(i); }
     }
-    if (best && (!bot.ranged || best_hp <= 2.0f * w.hp)) bot.try_attack_champion(*best);
+    if (best >= 0 && (!bot.ranged || best_hp <= 2.0f * w.hp)) { bot.try_attack_champion(w.enemies[best]); return false; }
+    // Ranged and hurt with an enemy close: back off towards spawn/allies instead of trading.
+    if (bot.ranged && w.hp < 0.6f * w.maxhp) {
+        for (const auto p : w.enemy_pos) if (cheb(p, w.pos) <= 3) { if (bot.step_away_from_threats()) return true; break; }
+    }
+    // Melee: punish an enemy standing close to our work when healthy; one step, then attack.
+    if (!bot.ranged && w.hp > 0.5f * w.maxhp && w.can_move()) {
+        int near = -1; int nd = 99;
+        for (std::size_t i = 0; i < w.enemies.size(); ++i) { const int d = cheb(w.enemy_pos[i], w.pos); if (d <= 3 && d < nd) { nd = d; near = static_cast<int>(i); } }
+        if (near >= 0) {
+            bitboard goals; goals.draw_chebyshev(w.enemy_pos[near], 1);
+            if (bot.step_towards(goals, false) && cheb(w.enemy_pos[near], w.pos) <= bot.attack_range && w.enemies[near].is_visible())
+                bot.try_attack_champion(w.enemies[near]);
+        }
+    }
     return false;
 }
 

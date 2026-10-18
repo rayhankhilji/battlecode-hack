@@ -58,17 +58,21 @@ Squad make_squad(const std::vector<Body>& bodies, std::vector<int> idx) {
         s.dps += b.dps();
         s.poke += b.poke;
         s.stun8 += b.stun8;
-        if (!b.ranged) { s.melee = true; if (b.hp > s.tank_hp) { s.tank_hp = b.hp; s.shield8 = b.shield8; } }
+        if (!b.ranged) { s.melee = true; s.tank_hp += b.hp; s.shield8 += b.shield8; }
     }
     s.stun8 = std::min(s.stun8, 4.0f);
     return s;
 }
 
 // Rounds to clear and whether a squad can take a group; returns rounds (<0 if infeasible).
+// Returns the cycle cost of clearing (rounds + amortised healing), or -1 if infeasible.
 float clear_rounds(const Squad& s, const GroupInfo& g) {
     if (g.excluded) return -1;
-    const Fight f = estimate_fight(g.hp, g.danger, g.max_danger, s.dps, s.poke, s.melee, s.tank_hp, s.stun8, s.shield8);
-    return f.feasible ? f.rounds : -1;
+    const Fight f = estimate_fight(g.hp, g.danger, g.max_danger, s.dps, s.poke, s.melee, 0.7f * s.tank_hp, s.stun8, s.shield8);
+    if (!f.feasible) return -1;
+    if (f.poke_only) return 2.0f * f.rounds; // slow and it idles the melee bodies
+    const float heal = s.tank_hp > 0 ? f.tank_damage / s.tank_hp * (5 + g.dist_spawn) : 0;
+    return f.rounds + heal;
 }
 
 float gold_weight = 0.30f;
@@ -87,7 +91,7 @@ void build_circuits(std::vector<Squad>& squads, const std::vector<GroupInfo>& gr
     std::vector<bool> taken(groups.size(), false);
     std::vector<vec2> pos(squads.size());
     std::vector<bool> first(squads.size(), true);
-    std::vector<float> cycle(squads.size(), 0), value(squads.size(), 0), longest(squads.size(), 0);
+    std::vector<float> cycle(squads.size(), 0), value(squads.size(), 0), longest(squads.size(), 0), gems(squads.size(), 0);
     bool progress = true;
     while (progress && fuel() > 200000) {
         progress = false;
@@ -108,13 +112,13 @@ void build_circuits(std::vector<Squad>& squads, const std::vector<GroupInfo>& gr
             }
             if (best < 0) continue;
             taken[best] = true; s.circuit.push_back(best); pos[si] = groups[best].center; first[si] = false;
-            cycle[si] += best_cycle; value[si] += groups[best].value;
+            cycle[si] += best_cycle; value[si] += groups[best].value; gems[si] += groups[best].gems + 0.1f * groups[best].gold;
             longest[si] = std::max(longest[si], groups[best].resp + best_rounds + 6);
             progress = true;
         }
     }
     for (std::size_t si = 0; si < squads.size(); ++si)
-        squads[si].rate = value[si] / std::max(cycle[si], std::max(longest[si], 1.0f));
+        squads[si].rate = gems[si] / std::max(cycle[si], std::max(longest[si], 1.0f));
 }
 
 // Static plan computed once in the first draft turn.
@@ -165,7 +169,7 @@ void compute_plan() {
         info.gems = static_cast<int>(g.gem_value()); info.gold = static_cast<int>(g.gold_value()); info.resp = g.max_respawn_timer();
         info.dist_spawn = ds; info.dist_enemy = de; info.dist_altar = da;
         info.home = ds <= de;
-        info.excluded = info.has_monolith || ds >= 60000 || da >= 60000;
+        info.excluded = ds >= 60000 || da >= 60000;
         int best_a = 0, best_d = 65535;
         for (std::size_t a = 0; a < altars.size(); ++a) {
             int d = 65535;
@@ -176,6 +180,11 @@ void compute_plan() {
         info.value = group_value(info);
         info.deliver = 0.5f * (info.dist_altar + info.gems / 10.0f + 2);
     }
+
+    // Monoliths are a last resort: keep them only when the reachable ordinary gems are scarce.
+    int ordinary_gems = 0;
+    for (const auto& g : groups) if (!g.excluded && !g.has_monolith) ordinary_gems += g.gems;
+    if (ordinary_gems >= 300) for (auto& g : groups) if (g.has_monolith) g.excluded = true;
 
     // Bodies in handle order.
     std::vector<champion_type> types;
@@ -192,7 +201,20 @@ void compute_plan() {
     int n_melee = 0; for (const auto& b : bodies) if (!b.ranged) ++n_melee;
 
     std::vector<Squad> best_squads; float best_total = -1;
-    for (int k = 1; k <= std::max(1, std::min(3, n_melee)); ++k) {
+    // Gem-scarce maps (monolith-only / one giant group) need every poker on the same target: count the
+    // gems the whole team could take by fronting; below 300 everyone stays together.
+    int frontable_gems = 0;
+    {
+        std::vector<int> all(nb); for (int i = 0; i < nb; ++i) all[i] = i;
+        const Squad team = make_squad(bodies, all);
+        for (const auto& g : groups) {
+            if (g.excluded) continue;
+            const Fight f = estimate_fight(g.hp, g.danger, g.max_danger, team.dps, team.poke, team.melee, 0.7f * team.tank_hp, team.stun8, team.shield8);
+            if (f.feasible && !f.poke_only) frontable_gems += g.gems;
+        }
+    }
+    const int max_k = frontable_gems < 300 ? 1 : std::max(1, std::min(3, n_melee));
+    for (int k = 1; k <= max_k; ++k) {
         if (fuel() < 250000) break;
         std::vector<std::vector<int>> parts(k);
         int cassi = -1, issac = -1;

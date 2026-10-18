@@ -27,7 +27,9 @@ struct World {
     bool at_spawn{};
     bitboard visible, blocked, camp_tiles, champ_tiles;
     std::vector<Monster> monsters;          // visible monsters
-    std::vector<cambc::champion> enemies;   // visible enemy champions
+    std::vector<cambc::champion> enemies;   // visible enemy champions (snapshot at turn start)
+    std::vector<vec2> enemy_pos;            // their positions at snapshot time (queries after a move can throw)
+    std::vector<float> enemy_hp;
     bool moved{}, attacked{}, casted{}, exclusive_cast{};
     bool can_move() const { return st.contains(cambc::champion_state::can_move) && !restr.contains(cambc::buff_restrictions::move) && !moved; }
     bool can_attack() const { return st.contains(cambc::champion_state::can_attack) && !restr.contains(cambc::buff_restrictions::attack); }
@@ -103,6 +105,7 @@ private:
     std::vector<bitboard> gspawn;
     std::vector<vec2> gcenter;
     std::vector<float> ghp, gdanger, gdmax;
+    std::vector<std::uint8_t> gexcluded;
     std::vector<int> ggems, ggold, gresp;
     std::vector<std::uint8_t> tile_group;
     std::vector<vec2> altars;
@@ -115,6 +118,10 @@ private:
     distance_field path_field; bitboard path_goals; std::uint32_t path_round{};
     std::vector<std::uint8_t> ally_alive;
     std::uint32_t next_pick_round{};
+    int last_path_dist{-1};
+    std::uint32_t recall_round{}; int recall_cancels{};
+    std::uint32_t detached_until{}; int detached_from{-1};
+    int approach_group_id{-1}; int approach_best{}; std::uint32_t approach_round{}; int spawn_wait{};
     std::vector<cambc::champion> allies;
     std::vector<Body> ally_body;
     std::vector<std::uint8_t> ally_slotplan; // index into plan.s or 255

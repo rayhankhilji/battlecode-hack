@@ -40,16 +40,23 @@ inline Body model_body(champion_type t) {
     return b;
 }
 
-// Expected rounds to clear a group with the given team dps, and the damage the tank absorbs.
-struct Fight { float rounds{}; float tank_damage{}; bool feasible{}; };
+// Expected rounds to clear a group with the given team dps, and the damage the front line absorbs.
+// Monsters hit only the nearest champion, so the melee bodies rotate the front: the usable health
+// pool is the sum over melee bodies of (health - 30% reserve). `pool` is that sum.
+struct Fight { float rounds{}; float tank_damage{}; bool feasible{}; bool poke_only{}; };
 inline Fight estimate_fight(float group_hp, float group_danger, float group_max_danger, float dps, float poke,
-                            bool melee_present, float tank_hp, float stun8, float shield8) {
+                            bool melee_present, float pool, float stun8, float shield8) {
     Fight f;
     if (group_danger <= 0) { f.rounds = std::ceil(group_hp / std::max(1.0f, dps)); f.feasible = true; return f; }
-    if (!melee_present) { f.rounds = poke > 0 ? std::ceil(group_hp / poke) : 1e6f; f.feasible = poke > 0; return f; }
-    f.rounds = std::ceil(group_hp / std::max(1.0f, dps));
-    f.tank_damage = std::max(0.0f, group_danger * f.rounds - std::min(stun8, 4.0f) * f.rounds / 8 * group_max_danger - shield8 * f.rounds / 8);
-    f.feasible = f.tank_damage <= 0.7f * tank_hp;
+    if (melee_present) {
+        f.rounds = std::ceil(group_hp / std::max(1.0f, dps));
+        f.tank_damage = std::max(0.0f, group_danger * f.rounds - std::min(stun8, 4.0f) * f.rounds / 8 * group_max_danger - shield8 * f.rounds / 8);
+        f.feasible = f.tank_damage <= pool;
+        if (f.feasible) return f;
+    }
+    // Nobody can stand in front: spells from range 4 take no damage at all.
+    if (poke > 0) { f.rounds = std::ceil(group_hp / poke); f.tank_damage = 0; f.feasible = true; f.poke_only = true; }
+    else { f.rounds = 1e6f; f.feasible = false; }
     return f;
 }
 

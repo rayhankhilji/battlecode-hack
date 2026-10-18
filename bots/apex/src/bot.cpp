@@ -88,10 +88,12 @@ void Bot::init() {
         }
         gcenter.push_back({ sx / std::max(n, 1), sy / std::max(n, 1) });
         ghp.push_back(hp); gdanger.push_back(dmg); gdmax.push_back(dmax);
+        gexcluded.push_back(dmax >= 200 ? 1 : 0);
         ggems.push_back(static_cast<int>(g.gem_value())); ggold.push_back(static_cast<int>(g.gold_value())); gresp.push_back(g.max_respawn_timer());
         if (static_cast<std::uint32_t>(static_cast<cambc::handle_camp_group_t>(g)) != gi) std::printf("warn: group handle %u != index %zu\n", (unsigned)static_cast<cambc::handle_camp_group_t>(g), gi);
     }
     if (plan_ok && plan.groups != groups.size()) { std::printf("warn: plan groups %d != %zu, ignoring plan\n", plan.groups, groups.size()); plan_ok = false; }
+    if (plan_ok) for (std::size_t gi = 0; gi < groups.size(); ++gi) gexcluded[gi] = (plan.g[gi].flags & GF_EXCLUDED) ? 1 : 0;
 
     const std::uint64_t i4 = fuel();
     const auto abilities = me.abilities();
@@ -152,6 +154,8 @@ void Bot::snapshot() {
         } catch (...) {}
     }
     w.enemies = cambc::vision::champions(team::enemy);
+    w.enemy_pos.clear(); w.enemy_hp.clear();
+    for (const auto& e : w.enemies) { w.enemy_pos.push_back(e.position()); w.enemy_hp.push_back(e.health()); }
     ally_alive.resize(allies.size());
     for (std::size_t i = 0; i < allies.size(); ++i) ally_alive[i] = static_cast<int>(i) == slot ? true : allies[i].is_alive();
 }
@@ -257,12 +261,14 @@ bool Bot::step_towards(const bitboard& goals_in, bool allow_dash) {
         }
         path_goals = goals_in; path_round = w.round;
     }
+    last_path_dist = here;
     // Dash first when the goal is far and the dash is ready.
     if (allow_dash && ab_dash >= 0 && here >= 3 && w.can_cast() && !w.restr.contains(buff_restrictions::cast)) {
         bool ready = false;
         guarded("dash-cd", [&] { ready = !ab[ab_dash]->is_on_cooldown(); return ready; });
         if (ready && fuel_ok(FUEL_RESERVE + 5000)) {
-            bitboard area; area.draw_chebyshev(w.pos, 2); area &= ~w.blocked;
+            bitboard dash_walls = w.blocked & ~cambc::map::holes();
+            bitboard area = dash_walls.reachable_tiles(w.pos, 2) & ~w.blocked;
             vec2 best = w.pos; std::uint16_t bd = here;
             for (auto t : area.positions()) { const auto d = field.get(t); if (d + 2 <= here && d < bd) { bd = d; best = t; } }
             if (best != w.pos) {
@@ -273,7 +279,7 @@ bool Bot::step_towards(const bitboard& goals_in, bool allow_dash) {
         }
     }
     if (!w.can_move()) return w.moved;
-    for (int attempt = 0; attempt < 2; ++attempt) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
         vec2 best = w.pos; std::uint16_t bd = here;
         for (auto t : w.blocked.reachable_tiles(w.pos, 1).positions()) {
             const auto d = field.get(t);
@@ -293,7 +299,7 @@ const distance_field& Bot::home_field() {
 
 bool Bot::in_danger_from_champions() const {
     if (w.hp > 0.35f * w.maxhp) return false;
-    for (const auto& e : w.enemies) if (cheb(e.position(), w.pos) <= 4) return true;
+    for (const auto p : w.enemy_pos) if (cheb(p, w.pos) <= 4) return true;
     return false;
 }
 
@@ -304,7 +310,7 @@ bool Bot::step_away_from_threats() {
     for (auto t : w.blocked.reachable_tiles(w.pos, 1).positions()) {
         float score = -static_cast<float>(home_field().get(t));
         int nearest = 99;
-        for (const auto& e : w.enemies) nearest = std::min(nearest, cheb(e.position(), t));
+        for (const auto p : w.enemy_pos) nearest = std::min(nearest, cheb(p, t));
         score += 3.0f * nearest;
         if (score > best_score) { best_score = score; best = t; }
     }
@@ -368,7 +374,7 @@ bool Bot::attack_reset_and_attack(int g) {
 }
 
 bool Bot::cast_damage_on_monster(const Monster& m) {
-    if (ab_damage < 0 || !w.can_cast()) return false;
+    if (ab_damage < 0 || !w.can_cast() || m.hp <= 0) return false;
     const auto info = ab[ab_damage]->get<cambc::ability_damage>();
     if (info.exclusive_with_movement && w.moved) return false;
     if (cheb(m.pos, w.pos) > static_cast<int>(info.range)) return false;
@@ -391,8 +397,8 @@ bool Bot::cast_aoe_on_monsters(int g) {
     // Centre on the living monster covering the most group members.
     const Monster* best = nullptr; int best_n = 0;
     for (const auto& m : w.monsters) {
-        if (m.group != g || cheb(m.pos, w.pos) > static_cast<int>(info.range)) continue;
-        int n = 0; for (const auto& o : w.monsters) if (o.group == g && cheb(o.pos, m.pos) <= static_cast<int>(info.radius)) ++n;
+        if (m.group != g || m.hp <= 0 || cheb(m.pos, w.pos) > static_cast<int>(info.range)) continue;
+        int n = 0; for (const auto& o : w.monsters) if (o.group == g && o.hp > 0 && cheb(o.pos, m.pos) <= static_cast<int>(info.radius)) ++n;
         if (n > best_n) { best_n = n; best = &m; }
     }
     if (!best) return false;
@@ -403,7 +409,7 @@ bool Bot::cast_aoe_on_monsters(int g) {
 }
 
 bool Bot::cast_cc_on_monster(const Monster& m) {
-    if (ab_cc < 0 || !w.can_cast()) return false;
+    if (ab_cc < 0 || !w.can_cast() || m.hp <= 0) return false;
     const auto info = ab[ab_cc]->get<cambc::ability_cc>();
     if (info.exclusive_with_movement && w.moved) return false;
     if (cheb(m.pos, w.pos) > static_cast<int>(info.range)) return false;
@@ -453,22 +459,32 @@ bool Bot::recover() {
     auto& me = cambc::self();
     if (w.at_spawn) {
         shop();
-        if (w.hp < 0.95f * w.maxhp) { mode = Mode::RECOVER; return true; }
+        recall_cancels = 0;
+        // Spawn heals fully at turn end: one waiting turn is enough. Enemies hitting us on spawn
+        // (possibly unseen, from bushes) must not keep us there forever.
+        ++spawn_wait;
+        if (w.hp < 0.95f * w.maxhp && (spawn_wait <= 2 || w.hp < 0.5f * w.maxhp)) { mode = Mode::RECOVER; return true; }
         recovering = false;
         return false;
     }
+    spawn_wait = 0;
     if (!recovering && w.hp < 0.35f * w.maxhp) { recovering = true; drop_target(); }
     if (!recovering) return false;
     mode = Mode::RECOVER;
-    // Safe to recall: no awake monster within reach and no enemy nearby.
-    bool threatened = false;
-    for (const auto& m : w.monsters) if (m.awake && cheb(m.pos, w.pos) <= CAMP_RANGE + 1) threatened = true;
-    for (const auto& e : w.enemies) if (cheb(e.position(), w.pos) <= 5) threatened = true;
-    if (!threatened) {
-        guarded("recall", [&] { me.recall(); return true; });
+    // A recall we started last turn that is no longer running was cancelled by damage (possibly from
+    // an unseen attacker): after two cancellations walk home instead of looping on recalls.
+    if (recall_round + 1 == w.round) ++recall_cancels;
+    const int home_dist = home_field().get(w.pos);
+    bool monsters_near = false, enemy_near = false;
+    for (const auto& m : w.monsters) if (m.awake && cheb(m.pos, w.pos) <= CAMP_RANGE + 1) monsters_near = true;
+    for (const auto p : w.enemy_pos) if (cheb(p, w.pos) <= 5) enemy_near = true;
+    if (!monsters_near && !enemy_near && recall_cancels < 2 && home_dist > 6) {
+        if (guarded("recall", [&] { me.recall(); return true; })) recall_round = w.round;
         return true;
     }
-    step_away_from_threats();
+    // Walk home (monsters do not chase; enemies near our spawn must not keep us out of it).
+    if (monsters_near && !enemy_near) { if (step_away_from_threats()) return true; }
+    step_towards(spawn, true);
     return true;
 }
 
@@ -509,7 +525,7 @@ void Bot::deliver() {
             }
         } else {
             bool enemy_near = false;
-            for (const auto& e : w.enemies) if (cheb(e.position(), w.pos) <= 8) enemy_near = true;
+            for (const auto p : w.enemy_pos) if (cheb(p, w.pos) <= 8) enemy_near = true;
             if (enemy_near) guarded("place-lock", [&] {
                 if (me.consumables()[cambc::consumable_type::altar_lock].count() > 0) return me.consumables()[cambc::consumable_type::altar_lock].use(a);
                 return false;
@@ -527,8 +543,7 @@ void Bot::drop_target() { target = -1; wait_rounds = 0; }
 
 bool Bot::target_available(int g, int travel) const {
     if (g < 0 || g >= static_cast<int>(groups.size())) return false;
-    if (plan_ok && (plan.g[g].flags & GF_EXCLUDED)) return false;
-    if (!plan_ok) { for (const auto& c : groups[g]) if (c.kind() == cambc::camp_type::monolith) return false; }
+    if (gexcluded[g]) return false;
     const Known& k = known[g];
     if (k.state == 3 && k.respawn_round > w.round + travel + 2) return false;
     return true;
@@ -542,69 +557,85 @@ int Bot::pick_target() {
     static distance_field field; static bitboard visited, origin;
     origin.clear(); origin.set(w.pos);
     field.compute(terrain, origin, visited);
-    prof[7] = std::max(prof[7], pf - fuel());
     const int my_squad = squad_of_slot(slot);
     // Squad composition (alive members) for feasibility.
-    float dps = 0, poke = 0, tank_hp = 0, stun8 = 0, shield8 = 0; bool melee = false;
+    float dps = 0, poke = 0, pool = 0, pool_full = 0, stun8 = 0, shield8 = 0; bool melee = false;
+    const bool solo = w.round < detached_until;
     for (std::size_t s = 0; s < allies.size(); ++s) {
+        if (solo && static_cast<int>(s) != slot) continue;
         if (squad_of_slot(static_cast<int>(s)) != my_squad) continue;
         if (!ally_alive[s]) continue;
         if (static_cast<int>(s) != slot && claims[s].phase == PH_DELIVER) continue;
         const Body& b = ally_body[s];
         dps += b.dps(); poke += b.poke; stun8 += b.stun8;
-        if (!b.ranged) { melee = true; const float hp = static_cast<int>(s) == slot ? w.hp : b.hp; if (hp > tank_hp) { tank_hp = hp; shield8 = b.shield8; } }
+        if (!b.ranged) {
+            melee = true; shield8 += b.shield8;
+            const float hp = static_cast<int>(s) == slot ? w.hp : 0.85f * b.hp;
+            pool += std::max(0.0f, hp - 0.3f * b.hp); pool_full += b.hp;
+        }
     }
     const float gw = (plan_ok ? plan.gold_weight_pct : 30) / 100.0f;
+    // Groups claimed by other squads (hoisted: one pass over the 8 claim slots).
+    std::uint64_t other_claimed = 0;
+    for (std::size_t s = 0; s < allies.size() && s < 8; ++s) {
+        if (static_cast<int>(s) == slot || !ally_alive[s] || squad_of_slot(static_cast<int>(s)) == my_squad) continue;
+        const Claim c = claims[s];
+        if (c.group < 64 && (c.phase == PH_CLEAR || c.phase == PH_CAPTURE)) other_claimed |= std::uint64_t{1} << c.group;
+    }
+    std::uint64_t in_circuit = 0;
+    if (plan_ok) for (int c = 0; c < mine.n; ++c) in_circuit |= std::uint64_t{1} << mine.circuit[c];
     int best = -1; float best_score = 0;
-    static bool dbg_done = false;
-    for (std::size_t g = 0; g < groups.size(); ++g) {
-        const std::uint64_t d0 = fuel();
+    const int ng = static_cast<int>(groups.size());
+    int rej[5] = {0, 0, 0, 0, 0};
+    for (int g = 0; g < ng; ++g) {
+        if ((other_claimed >> g) & 1) { ++rej[0]; continue; }
+        if (gexcluded[g] || (solo && g == detached_from)) { ++rej[1]; continue; }
         int travel = 65535;
-        for (const auto& c : groups[g]) travel = std::min<int>(travel, field.get(c.spawn_position()));
-        const std::uint64_t d1 = fuel();
-        if (travel >= 60000) continue;
-        if (!target_available(static_cast<int>(g), travel)) continue;
-        const std::uint64_t d2 = fuel();
-        if (!dbg_done && g == 5) { dbg_done = true; std::printf("pickdbg get=%llu avail=%llu\n", (unsigned long long)(d0 - d1), (unsigned long long)(d1 - d2)); }
-        bool other_squad = false;
-        for (std::size_t s = 0; s < allies.size() && s < 8; ++s) {
-            if (static_cast<int>(s) == slot || squad_of_slot(static_cast<int>(s)) == my_squad) continue;
-            if (claims[s].group == g && (claims[s].phase == PH_CLEAR || claims[s].phase == PH_CAPTURE) && ally_alive[s]) other_squad = true;
-        }
-        if (other_squad) continue;
-        const std::uint64_t d3 = fuel();
-        const Fight f = estimate_fight(ghp[g], gdanger[g], gdmax[g], dps, poke, melee, tank_hp, stun8, shield8);
-        const std::uint64_t d4 = fuel();
-        if (g == 5) std::printf("pickdbg squadloop=%llu fight=%llu\n", (unsigned long long)(d2 - d3), (unsigned long long)(d3 - d4));
-        if (!f.feasible) continue;
-        float value = ggems[g] + gw * ggold[g];
-        if (plan_ok) {
-            if (plan.g[g].flags & GF_HOME) value *= 1.2f;
-            for (int c = 0; c < mine.n; ++c) if (mine.circuit[c] == g) { value *= 1.5f; break; }
-        }
+        for (const auto& c : groups[g]) { const int d = field.get(c.spawn_position()); if (d < travel) travel = d; }
+        if (travel >= 60000) { ++rej[2]; continue; }
+        const Known& k = known[g];
         float wait = 0;
-        if (known[g].state == 3 && known[g].respawn_round > w.round + travel) wait = static_cast<float>(known[g].respawn_round - w.round - travel);
+        if (k.state == 3) {
+            if (k.respawn_round > w.round + travel + 2) { ++rej[3]; TRACE("  pick: g%d respawning until %u\n", g, k.respawn_round); continue; }
+            if (k.respawn_round > w.round + travel) wait = static_cast<float>(k.respawn_round - w.round - travel);
+        }
+        const Fight f = estimate_fight(ghp[g], gdanger[g], gdmax[g], dps, poke, melee, mode == Mode::IDLE ? pool : pool, stun8, shield8);
+        if (!f.feasible) { ++rej[4]; TRACE("  pick: g%d infeasible dps=%.0f poke=%.0f pool=%.0f melee=%d\n", g, dps, poke, pool, melee); continue; }
+        const float heal = pool_full > 0 ? f.tank_damage / pool_full * (5 + (plan_ok ? plan.g[g].dist_spawn : 10)) : 0;
+        float value = ggems[g] + gw * ggold[g];
+        if (plan_ok && (plan.g[g].flags & GF_HOME)) value *= 1.2f;
+        if ((in_circuit >> g) & 1) value *= 1.5f;
         const float dist_altar = plan_ok ? plan.g[g].dist_altar : 10;
-        const float cyc = travel + wait + f.rounds + 6 + 0.5f * (dist_altar + ggems[g] / 10.0f);
+        const float cyc = travel + wait + f.rounds + heal + 6 + 0.5f * (dist_altar + ggems[g] / 10.0f);
         const float score = value / cyc;
-        if (score > best_score) { best_score = score; best = static_cast<int>(g); }
-        if (g == 5) std::printf("pickdbg rest=%llu\n", (unsigned long long)(d2 - fuel()));
+        if (score > best_score) { best_score = score; best = g; }
     }
     if (best < 0) next_pick_round = w.round + 4;
+    TRACE("  pick: s=%d best=%d rej claimed=%d excl=%d unreach=%d resp=%d infeas=%d solo=%d\n", slot, best, rej[0], rej[1], rej[2], rej[3], rej[4], solo);
     return best;
 }
 
 void Bot::approach_group(int g) {
     mode = Mode::TRAVEL;
+    // Stall detection: no progress towards the group for 12 rounds (e.g. a corridor blocked by
+    // waiting allies) marks the group unavailable for a while so the squad re-plans.
     bitboard goals = dilate(gspawn[g], ranged ? 3 : 1) & ~terrain & ~gspawn[g];
+    last_path_dist = -1;
     step_towards(goals, true);
+    const int d = last_path_dist < 0 ? cheb(gcenter[g], w.pos) + 1000 : last_path_dist;
+    if (g != approach_group_id) { approach_group_id = g; approach_best = d; approach_round = w.round; }
+    else if (d < approach_best) { approach_best = d; approach_round = w.round; }
+    else if (w.round > approach_round + 15) {
+        known[g].state = 3; known[g].respawn_round = w.round + 60; known[g].round = w.round;
+        approach_group_id = -1; drop_target();
+    }
 }
 
 // Capture: every present squad member stands on a cleared tile (rewards split evenly, and the
 // gold funds everyone's shards). Members without a free tile wait next to the group.
 void Bot::capture_group(int g) {
     mode = Mode::CAPTURE;
-    write_claim(PH_CAPTURE, g);
+    write_claim(w.round < detached_until ? PH_IDLE : PH_CAPTURE, g);
     if (gspawn[g].is_set(w.pos)) return; // hold position
     bitboard free_tiles = gspawn[g] & ~w.blocked;
     if (!free_tiles.is_empty()) { step_towards(free_tiles, true); return; }
@@ -618,18 +649,20 @@ void Bot::engage_group(int g) {
     mode = Mode::CLEAR;
     std::vector<const Monster*> living;
     bool any_awake = false;
-    for (const auto& m : w.monsters) if (m.group == g && m.hp > 0) { living.push_back(&m); any_awake |= m.awake; }
-    // Claimants (squad mates working on this group) and present power.
-    std::vector<int> claimants{ slot };
-    for (std::size_t s = 0; s < allies.size() && s < 8; ++s) {
-        if (static_cast<int>(s) == slot || claims[s].group != g || claims[s].phase != PH_CLEAR || !ally_alive[s]) continue;
-        claimants.push_back(static_cast<int>(s));
+    float live_hp = 0, live_danger = 0, live_max = 0;
+    for (const auto& m : w.monsters) if (m.group == g && m.hp > 0) {
+        living.push_back(&m); any_awake |= m.awake;
+        const float d = camp_dmg(m.camp.kind());
+        live_hp += m.hp; live_danger += d; if (d > live_max) live_max = d;
     }
-    // The opener is the present melee claimant with the most health (it takes the aggro).
-    float dps = body.dps(); float poke = body.poke; float stun8 = body.stun8; float shield8 = body.ranged ? 0 : body.shield8; bool melee = !body.ranged;
-    int opener = ranged ? -1 : slot; float opener_hp = ranged ? -1 : w.hp;
+    // Squad mates working on this group, and the ones actually present (visible near the group).
+    int absent = 0;
+    for (std::size_t s = 0; s < allies.size() && s < 8; ++s)
+        if (static_cast<int>(s) != slot && claims[s].group == g && claims[s].phase == PH_CLEAR && ally_alive[s]) ++absent;
+    float dps = body.dps(), poke = body.poke, stun8 = body.stun8, shield8 = ranged ? 0 : body.shield8;
+    bool melee_present = !ranged;
+    float pool = ranged ? 0 : std::max(0.0f, w.hp - 0.3f * w.maxhp);
     bool tank_adjacent = false;
-    int absent = static_cast<int>(claimants.size()) - 1;
     {
         bitboard near_group; near_group.draw_chebyshev(gcenter[g], 8);
         for (const auto& a : cambc::vision::champions(team::ally)) {
@@ -642,65 +675,82 @@ void Bot::engage_group(int g) {
             --absent;
             dps += ally_body[s].dps(); poke += ally_body[s].poke; stun8 += ally_body[s].stun8;
             if (!ally_body[s].ranged) {
-                melee = true;
-                const float hp = a.health();
-                if (hp > opener_hp || (hp == opener_hp && s < opener)) { opener_hp = hp; opener = s; shield8 = ally_body[s].shield8; }
+                melee_present = true; shield8 += ally_body[s].shield8;
+                pool += std::max(0.0f, a.health() - 0.3f * ally_body[s].hp);
+                for (const Monster* m : living) if (cheb(m->pos, p) <= 1) { tank_adjacent = true; break; }
             }
-            for (const Monster* m : living) if (cheb(m->pos, p) <= 1) tank_adjacent = true;
         }
     }
-    const bool opener_present = opener >= 0;
-    float live_hp = 0, live_danger = 0, live_max = 0;
-    for (const Monster* m : living) { live_hp += m->hp; live_danger += camp_dmg(m->camp.kind()); live_max = std::max(live_max, camp_dmg(m->camp.kind())); }
-    const float incoming = incoming_damage_at(w.pos, g);
-    const bool i_open = opener == slot;
-    const Fight fight = estimate_fight(live_hp, live_danger, live_max, dps, poke, melee, opener_hp, stun8, shield8);
-    TRACE("  engage: living=%zu awake=%d opener=%d absent=%d tankadj=%d dps=%.0f feas=%d rounds=%.0f dmg=%.0f wait=%d\n", living.size(), any_awake, opener, absent, tank_adjacent, dps, fight.feasible, fight.rounds, fight.tank_damage, wait_rounds);
-    bool allowed;
-    if (live_danger <= 0 || any_awake || tank_adjacent) allowed = true;
-    else if (i_open) allowed = fight.feasible;
-    else if (!opener_present && ranged) allowed = true; // poke-only squad
-    else allowed = false;
-    if (allowed) wait_rounds = 0;
-    else if (i_open) {
-        // I would take the aggro but cannot survive it: heal if hurt, otherwise wait for the squad.
-        if (w.hp < 0.85f * w.maxhp) { recovering = true; drop_target(); recover(); return; }
-        if (absent == 0 || ++wait_rounds > 20) { known[g].state = 3; known[g].respawn_round = w.round + 40; drop_target(); return; }
-    } else if (!opener_present) {
-        if (++wait_rounds > 30) { known[g].state = 3; known[g].respawn_round = w.round + 40; drop_target(); return; }
+    const Fight fight = estimate_fight(live_hp, live_danger, live_max, dps, poke, melee_present, pool, stun8, shield8);
+    const float reserve = 0.3f * w.maxhp + 2 * live_danger;
+    const bool can_front = !ranged && w.hp > reserve;
+    enum Plan { FRONT, RANGED_ATTACK, POKE, WAIT } plan;
+    if (live_danger <= 0) plan = ranged ? RANGED_ATTACK : FRONT;
+    else if (!ranged) {
+        if (can_front && (any_awake || (fight.feasible && !fight.poke_only))) plan = FRONT;
+        else if (!can_front) {
+            // Too hurt to hold the front: heal if nobody else holds it, otherwise wait behind.
+            if (w.hp < 0.6f * w.maxhp && !tank_adjacent) { recovering = true; drop_target(); recover(); return; }
+            plan = WAIT;
+        }
+        else if (body.poke > 0) plan = POKE;
+        else plan = WAIT;
+    } else {
+        if (tank_adjacent) plan = RANGED_ATTACK;
+        else if (body.poke > 0) plan = POKE;
+        else plan = WAIT;
     }
+    // Nobody can take this group: wait for absent squad mates for a while, then give up.
+    if (!fight.feasible && (can_front || ranged)) {
+        if (absent == 0 || ++wait_rounds > 20) { known[g].state = 3; known[g].respawn_round = w.round + 40; drop_target(); return; }
+    } else if (plan == FRONT || plan == RANGED_ATTACK) wait_rounds = 0;
+    // A melee body with nothing to contribute to a poke-only clear goes farming on its own for a while.
+    if (plan == WAIT && fight.poke_only && absent == 0 && can_front && body.poke <= 0) {
+        detached_until = w.round + 80; detached_from = g; drop_target(); return;
+    }
+    TRACE("  engage: living=%zu awake=%d absent=%d tankadj=%d dps=%.0f pool=%.0f feas=%d poke=%d rounds=%.0f dmg=%.0f plan=%d\n", living.size(), any_awake, absent, tank_adjacent, dps, pool, fight.feasible, fight.poke_only, fight.rounds, fight.tank_damage, (int)plan);
 
-    // Bail out when the fight turned bad for me specifically.
-    if (any_awake && incoming > 0 && w.hp < std::max(0.25f * w.maxhp, 3 * incoming + 50)) { recovering = true; drop_target(); recover(); return; }
-
-    // Positions.
+    // Position rings (min distance to any living monster in [keep, want]).
+    int want = 1, keep = 1;
+    switch (plan) {
+    case FRONT: want = 1; keep = 1; break;
+    case RANGED_ATTACK: want = 3; keep = 2; break;
+    case POKE: want = 4; keep = 4; break;
+    case WAIT: want = 6; keep = 4; break;
+    }
     bitboard outer, inner;
-    const int want = allowed ? (ranged ? 3 : 1) : 4;
-    const int keep = allowed ? (ranged ? 2 : 1) : 4;
     for (const Monster* m : living) { outer.draw_chebyshev(m->pos, want); if (keep > 1) inner.draw_chebyshev(m->pos, keep - 1); }
     bitboard goals = outer & ~inner & ~w.blocked;
-    if (allowed && ranged) goals &= w.visible;
-    if (!allowed && !ranged) { // waiting melee: idle at ring 4-5 (no walking needed when already outside range)
-        int mind = 99; for (const Monster* m : living) mind = std::min(mind, cheb(m->pos, w.pos));
-        if (mind >= 4 && mind <= 6) return;
-        bitboard o2; for (const Monster* m : living) o2.draw_chebyshev(m->pos, 5);
-        goals = o2 & ~inner & ~w.blocked;
+    if (plan == RANGED_ATTACK || plan == POKE) goals &= w.visible;
+    int mind = 99; for (const Monster* m : living) mind = std::min(mind, cheb(m->pos, w.pos));
+    const bool in_pos = mind >= keep && mind <= want;
+
+    // Never path through the strike zone of monsters that are (or will be) awake while staying back.
+    if (plan == WAIT || plan == POKE) {
+        bitboard zone; for (const Monster* m : living) zone.draw_chebyshev(m->pos, CAMP_RANGE);
+        zone.set(w.pos, false);
+        w.blocked |= zone;
+        goals &= ~zone;
     }
-    if (!allowed) {
-        // Casters poke from range 4 while waiting.
-        if (ranged) {
-            const Monster* t = choose_attack_target(g, 4);
-            if (t && w.can_cast() && !w.moved) { if (!cast_damage_on_monster(*t)) cast_aoe_on_monsters(g); }
+    if (plan == WAIT) { if (!in_pos) step_towards(goals, false); return; }
+    if (plan == POKE) {
+        const Monster* t4 = choose_attack_target(g, 4);
+        if (t4 && w.can_cast() && !w.moved) {
+            if (ab_damage >= 0 && ab_aoe >= 0) {
+                int n = 0; for (const Monster* m : living) if (cheb(m->pos, t4->pos) <= 1) ++n;
+                if (n >= 2) { if (!cast_aoe_on_monsters(g)) cast_damage_on_monster(*t4); }
+                else { if (!cast_damage_on_monster(*t4)) cast_aoe_on_monsters(g); }
+            } else if (ab_damage >= 0) cast_damage_on_monster(*t4);
+            else if (ab_aoe >= 0) cast_aoe_on_monsters(g);
+            if (!w.casted && ab_cc >= 0) {
+                const Monster* big = nullptr; for (const Monster* m : living) if (m->hp > 0 && cheb(m->pos, w.pos) <= 4 && (!big || camp_dmg(m->camp.kind()) > camp_dmg(big->camp.kind()))) big = m;
+                if (big) cast_cc_on_monster(*big);
+            }
         }
-        int mind = 99; for (const Monster* m : living) mind = std::min(mind, cheb(m->pos, w.pos));
-        if (mind < 4 || mind > 6) step_towards(goals, false);
+        if (!w.exclusive_cast && !in_pos) step_towards(goals, false);
         return;
     }
-
-    // Engaged. Ranged: spells first (they exclude walking), then attack, else reposition.
-    const bool in_pos = goals.is_set(w.pos);
-    TRACE("  engaged in_pos=%d goals=%u canmove=%d canatk=%d cancast=%d\n", in_pos, goals.count(), w.can_move(), w.can_attack(), w.can_cast());
-    if (ranged) {
+    if (plan == RANGED_ATTACK) {
         const Monster* t4 = choose_attack_target(g, 4);
         const Monster* t3 = choose_attack_target(g, attack_range);
         if (t4 && w.can_cast() && !w.moved && (in_pos || t3)) {
@@ -712,7 +762,7 @@ void Bot::engage_group(int g) {
             else if (ab_aoe >= 0) cast_aoe_on_monsters(g);
         }
         if (t4 && any_awake && ab_cc >= 0 && w.can_cast()) {
-            const Monster* big = nullptr; for (const Monster* m : living) if (m->awake && cheb(m->pos, w.pos) <= 4 && (!big || camp_dmg(m->camp.kind()) > camp_dmg(big->camp.kind()))) big = m;
+            const Monster* big = nullptr; for (const Monster* m : living) if (m->hp > 0 && m->awake && cheb(m->pos, w.pos) <= 4 && (!big || camp_dmg(m->camp.kind()) > camp_dmg(big->camp.kind()))) big = m;
             if (big && camp_dmg(big->camp.kind()) > 0) cast_cc_on_monster(*big);
         }
         if (t3 && w.can_attack() && (in_pos || w.exclusive_cast)) {
@@ -724,19 +774,19 @@ void Bot::engage_group(int g) {
         else if (t3 && w.can_attack()) { attack_monster(*t3); attack_reset_and_attack(g); }
         return;
     }
-    // Melee: close in first (dash allowed), then attack, then spend the cast.
+    // FRONT (melee): close in first (dash allowed), then attack, then spend the cast.
     if (!in_pos) step_towards(goals, true);
     const Monster* t = choose_attack_target(g, attack_range);
     if (!t) return;
     attack_monster(*t);
+    if (t->hp <= 0) t = choose_attack_target(g, attack_range);
     const float incoming_now = incoming_damage_at(w.pos, g);
     if (cast_shield(incoming_now)) return;
     if (!w.moved) {
-        // Stationary: damaging/stunning spells beat a reset when several monsters are awake.
-        const Monster* big = nullptr; for (const Monster* m : living) if (cheb(m->pos, w.pos) <= 4 && (!big || camp_dmg(m->camp.kind()) > camp_dmg(big->camp.kind()))) big = m;
-        if (ab_aoe >= 0 && living.size() >= 1 && cast_aoe_on_monsters(g)) return;
+        const Monster* big = nullptr; for (const Monster* m : living) if (m->hp > 0 && cheb(m->pos, w.pos) <= 4 && (!big || camp_dmg(m->camp.kind()) > camp_dmg(big->camp.kind()))) big = m;
+        if (ab_aoe >= 0 && cast_aoe_on_monsters(g)) return;
         if (ab_cc >= 0 && big && cast_cc_on_monster(*big)) return;
-        if (ab_damage >= 0 && cast_damage_on_monster(*t)) return;
+        if (ab_damage >= 0 && t && cast_damage_on_monster(*t)) return;
     }
     attack_reset_and_attack(g);
 }
@@ -753,7 +803,8 @@ void Bot::farm() {
         const int r = rank_of_slot(static_cast<int>(s));
         if (r < leader_rank || (r == leader_rank && static_cast<int>(s) < leader)) { leader_rank = r; leader = static_cast<int>(s); }
     }
-    if (leader >= 0 && leader != slot) {
+    const bool detached = w.round < detached_until;
+    if (leader >= 0 && leader != slot && !detached) {
         const int follow = claims[leader].group;
         if (follow != target && target_available(follow, 0)) { target = follow; target_since = w.round; wait_rounds = 0; }
     }
@@ -767,16 +818,25 @@ void Bot::farm() {
                 write_claim(PH_IDLE, -1);
                 if (w.gems > 0) { delivering = true; deliver(); return; }
                 if (w.hp < 0.8f * w.maxhp && !w.at_spawn) { recovering = true; recover(); return; }
-                // Wait near the group that respawns soonest.
+                // Wait near the group that respawns soonest, never on a spawn tile (that delays it).
                 int soon = -1; std::uint32_t best = ~0u;
                 for (std::size_t g = 0; g < groups.size(); ++g)
-                    if (known[g].state == 3 && known[g].respawn_round < best && !(plan_ok && (plan.g[g].flags & GF_EXCLUDED))) { best = known[g].respawn_round; soon = static_cast<int>(g); }
-                if (soon >= 0) { bitboard goals = dilate(gspawn[soon], 5) & ~dilate(gspawn[soon], 3) & ~terrain; step_towards(goals, false); }
+                    if (known[g].state == 3 && known[g].respawn_round < best && !gexcluded[g]) { best = known[g].respawn_round; soon = static_cast<int>(g); }
+                const int W = cambc::map::width();
+                const bool on_tile = tile_group[static_cast<std::size_t>(w.pos.y * W + w.pos.x)] != 0;
+                if (soon >= 0) {
+                    bitboard goals = dilate(gspawn[soon], 5) & ~dilate(gspawn[soon], 1) & ~terrain;
+                    if (on_tile || !goals.is_set(w.pos)) step_towards(goals, false);
+                } else if (on_tile) {
+                    bitboard goals; goals.draw_chebyshev(w.pos, 3); goals &= ~w.camp_tiles;
+                    for (const auto& gs : gspawn) goals &= ~gs;
+                    step_towards(goals & ~terrain, false);
+                }
                 return;
             }
         }
         const int g = target;
-        write_claim(PH_CLEAR, g);
+        write_claim(detached ? PH_IDLE : PH_CLEAR, g); // detached bodies never lead the squad
         bool visible = false;
         for (const auto& c : groups[g]) if (w.visible.is_set(c.spawn_position())) { visible = true; break; }
         bool living = false;
@@ -792,6 +852,8 @@ void Bot::farm() {
                 auto& me = cambc::self();
                 guarded("ward", [&] { if (me.ward_cooldown() == 0) me.place_ward(w.pos); return true; });
             }
+            // Still respawning (an occupied spawn tile delays it): do not re-pick it this turn.
+            known[g].respawn_round = std::max(known[g].respawn_round, w.round + 8);
             drop_target(); continue;
         }
         // Alive by state but nothing visible: get closer to see the members.
