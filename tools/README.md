@@ -166,3 +166,20 @@ Engine quirks observed (cambc 2.2.5 / engine 0.0.3):
 - Team stdout inside the bundle has stray NUL bytes; there is no stderr member and `.debug` is empty in release.
 - First play turn gets 200,000 fuel (draft first turn 1,000,000); the starters use 75–120k of it, so a bot that
   does heavy init on turn 1 is fine up to 2x the normal quantum but not beyond.
+
+## replay_dump.mjs / replay_analyse.py / replay_validate.py
+
+Full per-round, per-champion decoding of any `.repl26a` (local or ladder bundle) through the official engine WASM
+that the `cambc` visualiser caches under `~/.cache/cambc/assets/`. See `docs/REPLAY.md` for the record format, the
+snapshot layout assumptions and every metric definition.
+
+```
+node tools/replay_dump.mjs REPLAY.repl26a -o out.jsonl [--every N] [--items]     # JSONL: meta, champ rows, round rows, events, final
+node tools/replay_dump.mjs REPLAY.repl26a --summary                              # winner, finish round, drafts, K/D/A, first tribute
+tools/replay_analyse.py out.jsonl [more.jsonl|REPLAY.repl26a ...] -o report.md --names "A=apex,B=Mite"   # A vs B markdown report
+tools/replay_validate.py DIR|REPLAY.repl26a [STATS.json]                         # exact cross-check against --statistics JSON
+```
+
+Validated 34/34 on `replays/apex-final-spar-farmer` (gems, winner, finish round, per-champion K/D/A, gems, gold, earned
+gold, death rounds, submission and campClear counts all exact). ~1.5–3.5 s per match. `docs/MITE-ANALYSIS.md` is the
+report for the two ladder games against Mite.
