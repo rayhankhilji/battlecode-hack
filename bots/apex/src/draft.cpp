@@ -34,7 +34,8 @@ void bodies_of(champion_draft pick, std::vector<champion_type>& out) {
 
 struct GroupInfo {
     vec2 center{};
-    float hp{}, danger{};
+    float value{}, deliver{};
+    float hp{}, danger{}, max_danger{};
     int gems{}, gold{}, resp{};
     int dist_spawn{255}, dist_altar{255}, dist_enemy{255};
     int altar{};
@@ -66,7 +67,7 @@ Squad make_squad(const std::vector<Body>& bodies, std::vector<int> idx) {
 // Rounds to clear and whether a squad can take a group; returns rounds (<0 if infeasible).
 float clear_rounds(const Squad& s, const GroupInfo& g) {
     if (g.excluded) return -1;
-    const Fight f = estimate_fight(g.hp, g.danger, s.dps, s.poke, s.melee, s.tank_hp, s.stun8, s.shield8);
+    const Fight f = estimate_fight(g.hp, g.danger, g.max_danger, s.dps, s.poke, s.melee, s.tank_hp, s.stun8, s.shield8);
     return f.feasible ? f.rounds : -1;
 }
 
@@ -79,31 +80,35 @@ float group_value(const GroupInfo& g) {
 }
 
 void build_circuits(std::vector<Squad>& squads, const std::vector<GroupInfo>& groups) {
+    // Per-squad clear rounds are fixed per group: compute once (G x S), then the greedy tour is cheap.
+    std::vector<std::vector<float>> rounds(squads.size(), std::vector<float>(groups.size(), -1.0f));
+    for (std::size_t si = 0; si < squads.size(); ++si)
+        for (std::size_t gi = 0; gi < groups.size(); ++gi) rounds[si][gi] = clear_rounds(squads[si], groups[gi]);
     std::vector<bool> taken(groups.size(), false);
     std::vector<vec2> pos(squads.size());
     std::vector<bool> first(squads.size(), true);
     std::vector<float> cycle(squads.size(), 0), value(squads.size(), 0), longest(squads.size(), 0);
     bool progress = true;
-    while (progress) {
+    while (progress && fuel() > 200000) {
         progress = false;
         for (std::size_t si = 0; si < squads.size(); ++si) {
             Squad& s = squads[si];
             if (s.circuit.size() >= MAX_CIRCUIT) continue;
             int best = -1; float best_score = 0, best_cycle = 0, best_rounds = 0;
+            const int px = pos[si].x, py = pos[si].y;
             for (std::size_t gi = 0; gi < groups.size(); ++gi) {
                 if (taken[gi]) continue;
+                const float r = rounds[si][gi];
+                if (r < 0) continue;
                 const GroupInfo& g = groups[gi];
-                const float rounds = clear_rounds(s, g);
-                if (rounds < 0) continue;
-                const float travel = first[si] ? g.dist_spawn : cheb(pos[si], g.center) * 1.2f;
-                const float deliver = 0.5f * (g.dist_altar + g.gems / 10.0f + 2);
-                const float cyc = travel + rounds + 6 + deliver;
-                const float score = group_value(g) / cyc;
-                if (score > best_score) { best_score = score; best = static_cast<int>(gi); best_cycle = cyc; best_rounds = rounds; }
+                const float travel = first[si] ? g.dist_spawn : std::max(std::abs(px - g.center.x), std::abs(py - g.center.y)) * 1.2f;
+                const float cyc = travel + r + 6 + g.deliver;
+                const float score = g.value / cyc;
+                if (score > best_score) { best_score = score; best = static_cast<int>(gi); best_cycle = cyc; best_rounds = r; }
             }
             if (best < 0) continue;
             taken[best] = true; s.circuit.push_back(best); pos[si] = groups[best].center; first[si] = false;
-            cycle[si] += best_cycle; value[si] += group_value(groups[best]);
+            cycle[si] += best_cycle; value[si] += groups[best].value;
             longest[si] = std::max(longest[si], groups[best].resp + best_rounds + 6);
             progress = true;
         }
@@ -152,7 +157,7 @@ void compute_plan() {
         for (const auto& c : g) {
             const vec2 p = c.spawn_position();
             sx += p.x; sy += p.y; ++n;
-            info.hp += camp_hp(c.kind()); info.danger += camp_dmg(c.kind());
+            info.hp += camp_hp(c.kind()); info.danger += camp_dmg(c.kind()); info.max_danger = std::max(info.max_danger, camp_dmg(c.kind()));
             if (c.kind() == cambc::camp_type::monolith) info.has_monolith = true;
             ds = std::min<int>(ds, f_spawn.get(p)); de = std::min<int>(de, f_enemy.get(p)); da = std::min<int>(da, f_altar.get(p));
         }
@@ -168,6 +173,8 @@ void compute_plan() {
             if (d < best_d) { best_d = d; best_a = static_cast<int>(a); }
         }
         info.altar = best_a;
+        info.value = group_value(info);
+        info.deliver = 0.5f * (info.dist_altar + info.gems / 10.0f + 2);
     }
 
     // Bodies in handle order.
@@ -186,6 +193,7 @@ void compute_plan() {
 
     std::vector<Squad> best_squads; float best_total = -1;
     for (int k = 1; k <= std::max(1, std::min(3, n_melee)); ++k) {
+        if (fuel() < 250000) break;
         std::vector<std::vector<int>> parts(k);
         int cassi = -1, issac = -1;
         for (int i = 0; i < nb; ++i) { if (bodies[i].type == champion_type::cassi) cassi = i; if (bodies[i].type == champion_type::issac) issac = i; }
@@ -208,7 +216,7 @@ void compute_plan() {
     std::memset(&g_plan, 0, sizeof(g_plan));
     g_plan.version = PLAN_VERSION; g_plan.bodies = static_cast<std::uint8_t>(nb); g_plan.groups = static_cast<std::uint8_t>(n_groups);
     g_plan.squads = static_cast<std::uint8_t>(best_squads.size());
-    g_plan.gold_weight_pct = 30; g_plan.bank_threshold = 40;
+    g_plan.gold_weight_pct = 30; g_plan.bank_threshold = 36;
     for (int gi = 0; gi < n_groups; ++gi) {
         const GroupInfo& g = groups[gi];
         g_plan.g[gi] = { static_cast<std::uint8_t>(g.altar), cap255(g.dist_spawn), cap255(g.dist_altar),
@@ -241,19 +249,18 @@ void compute_plan() {
 void play_draft() {
     const auto chosen = cambc::draft::current_draft(team::ally);
     const std::uint32_t size = cambc::draft::team_size();
-    // Decide the whole pick list up front so the plan can be written in the first (10x fuel) turn.
+    // Pick first (a missed pick is randomised by the engine), then plan with the remaining fuel.
+    champion_draft pick = ROSTER[0];
+    for (auto c : ROSTER) {
+        if (std::find(chosen.begin(), chosen.end(), c) == chosen.end()) { pick = c; break; }
+    }
+    cambc::draft::pick(pick);
     if (g_picks.empty()) {
         for (auto c : ROSTER) { if (g_picks.size() < size) g_picks.push_back(c); }
-        try { compute_plan(); } catch (const std::exception& e) { std::printf("draft: plan failed: %s\n", e.what()); }
+        if (fuel() > 400000) {
+            try { compute_plan(); } catch (const std::exception& e) { std::printf("draft: plan failed: %s\n", e.what()); }
+        } else std::printf("draft: not enough fuel for a plan (%llu)\n", (unsigned long long)fuel());
     }
-    // Pick the first roster entry we have not taken yet (enemy duplicates are allowed).
-    champion_draft pick = ROSTER[0];
-    bool found = false;
-    for (auto c : ROSTER) {
-        if (std::find(chosen.begin(), chosen.end(), c) == chosen.end()) { pick = c; found = true; break; }
-    }
-    if (!found) pick = ROSTER[0];
-    cambc::draft::pick(pick);
 }
 
 } // namespace apex

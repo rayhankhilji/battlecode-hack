@@ -102,7 +102,7 @@ private:
     std::vector<cambc::map::camp_group> groups;
     std::vector<bitboard> gspawn;
     std::vector<vec2> gcenter;
-    std::vector<float> ghp, gdanger;
+    std::vector<float> ghp, gdanger, gdmax;
     std::vector<int> ggems, ggold, gresp;
     std::vector<std::uint8_t> tile_group;
     std::vector<vec2> altars;
@@ -127,8 +127,11 @@ private:
     Claim my_claim{NO_GROUP, PH_IDLE};
     Mode mode{Mode::IDLE};
 
+public:
     // telemetry
     std::uint64_t fmin{~0ull};
+    std::uint64_t prof[8]{};
+    std::uint64_t prof_start{};
     std::uint32_t susp{};
     std::uint32_t prev_round{};
     bool have_prev{};

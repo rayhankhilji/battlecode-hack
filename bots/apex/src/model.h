@@ -42,13 +42,13 @@ inline Body model_body(champion_type t) {
 
 // Expected rounds to clear a group with the given team dps, and the damage the tank absorbs.
 struct Fight { float rounds{}; float tank_damage{}; bool feasible{}; };
-inline Fight estimate_fight(float group_hp, float group_danger, float dps, float poke, bool melee_present,
-                            float tank_hp, float stun8, float shield8) {
+inline Fight estimate_fight(float group_hp, float group_danger, float group_max_danger, float dps, float poke,
+                            bool melee_present, float tank_hp, float stun8, float shield8) {
     Fight f;
     if (group_danger <= 0) { f.rounds = std::ceil(group_hp / std::max(1.0f, dps)); f.feasible = true; return f; }
     if (!melee_present) { f.rounds = poke > 0 ? std::ceil(group_hp / poke) : 1e6f; f.feasible = poke > 0; return f; }
     f.rounds = std::ceil(group_hp / std::max(1.0f, dps));
-    f.tank_damage = std::max(0.0f, group_danger * f.rounds * (1 - std::min(stun8, 4.0f) / 8) - shield8 * f.rounds / 8);
+    f.tank_damage = std::max(0.0f, group_danger * f.rounds - std::min(stun8, 4.0f) * f.rounds / 8 * group_max_danger - shield8 * f.rounds / 8);
     f.feasible = f.tank_damage <= 0.7f * tank_hp;
     return f;
 }
