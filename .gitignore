@@ -1,0 +1,12 @@
+# cambc generated / cached
+sdk/
+.cambc/
+**/.cambc/
+replays/
+*.repl26a
+build/
+__pycache__/
+*.pyc
+.venv/
+venv/
+# keep maps/ and bots/ in git
