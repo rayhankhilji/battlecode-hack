@@ -239,6 +239,17 @@ void compute_plan() {
     g_plan.version = PLAN_VERSION; g_plan.bodies = static_cast<std::uint8_t>(nb); g_plan.groups = static_cast<std::uint8_t>(n_groups);
     g_plan.squads = static_cast<std::uint8_t>(best_squads.size());
     g_plan.gold_weight_pct = 30; g_plan.bank_threshold = 36;
+    // Per-map bank threshold: short camp->altar trips (median over the gem groups) make small bags
+    // worth banking early (the reward is split among the capturing squad, so bags fill slowly).
+    {
+        std::vector<int> da;
+        for (const auto& g : groups) if (!g.excluded && g.gems > 0) da.push_back(g.dist_altar);
+        if (!da.empty()) {
+            std::sort(da.begin(), da.end());
+            const int median = da[da.size() / 2];
+            g_plan.bank_threshold = static_cast<std::uint8_t>(std::clamp(3 * median, 16, 36));
+        }
+    }
     for (int gi = 0; gi < n_groups; ++gi) {
         const GroupInfo& g = groups[gi];
         g_plan.g[gi] = { static_cast<std::uint8_t>(g.altar), cap255(g.dist_spawn), cap255(g.dist_altar),
