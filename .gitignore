@@ -13,3 +13,4 @@ venv/
 .venv
 bots/starter-ocaml/
 bots/starter-rust/
+.claude/
