@@ -68,16 +68,18 @@ void Bot::init() {
     altars = cambc::map::altars().positions();
     for (auto a : altars) altar_goals.draw_chebyshev(a, 1);
     altar_goals &= ~terrain;
-    { bitboard visited; f_home.compute(terrain, spawn, visited); }
 
     const std::uint64_t i2 = fuel();
     groups = cambc::map::camp_groups();
     const std::uint64_t i3 = fuel();
     const int W = cambc::map::width(), H = cambc::map::height();
     tile_group.assign(static_cast<std::size_t>(W * H), 0);
+    gspawn.reserve(groups.size()); gcenter.reserve(groups.size()); ghp.reserve(groups.size()); gdanger.reserve(groups.size());
+    gdmax.reserve(groups.size()); ggems.reserve(groups.size()); ggold.reserve(groups.size()); gresp.reserve(groups.size());
     for (std::size_t gi = 0; gi < groups.size() && gi < MAX_GROUPS; ++gi) {
         const auto& g = groups[gi];
-        gspawn.push_back(g.spawn_tiles());
+        gspawn.emplace_back(cambc::uninitialized);
+        g.spawn_tiles_into(gspawn.back());
         int sx = 0, sy = 0, n = 0; float hp = 0, dmg = 0, dmax = 0;
         for (const auto& c : g) {
             const vec2 p = c.spawn_position();
@@ -135,14 +137,23 @@ void Bot::snapshot() {
     w.blocked.set(w.pos, false);
     w.monsters.clear();
     const int W = cambc::map::width();
-    for (auto& c : cambc::vision::camps()) {
-        const vec2 sp = c.spawn_position();
-        const int g = static_cast<int>(tile_group[static_cast<std::size_t>(sp.y * W + sp.x)]) - 1;
+    // Only load camps that matter this turn: my target group and anything that can hit me.
+    static std::vector<vec2> tiles; tiles.resize(64);
+    const std::uint32_t n = w.camp_tiles.positions_into(tiles);
+    for (std::uint32_t i = 0; i < n && i < tiles.size(); ++i) {
+        const vec2 p = tiles[i];
+        const int g = static_cast<int>(tile_group[static_cast<std::size_t>(p.y * W + p.x)]) - 1;
         if (g < 0) continue;
-        Monster m{ c, c.position(), c.health(), g, c.is_awake() };
-        w.monsters.push_back(std::move(m));
+        if (g != target && cheb(p, w.pos) > CAMP_RANGE + 1) continue;
+        try {
+            cambc::camp c = cambc::vision::camp_at(p);
+            Monster m{ c, p, c.health(), g, c.is_awake() };
+            w.monsters.push_back(std::move(m));
+        } catch (...) {}
     }
     w.enemies = cambc::vision::champions(team::enemy);
+    ally_alive.resize(allies.size());
+    for (std::size_t i = 0; i < allies.size(); ++i) ally_alive[i] = static_cast<int>(i) == slot ? true : allies[i].is_alive();
 }
 
 void Bot::read_claims() {
@@ -162,6 +173,9 @@ void Bot::update_known() {
         bool seen = false;
         for (const auto& c : groups[g]) if (w.visible.is_set(c.spawn_position())) { seen = true; break; }
         if (!seen) continue;
+        bool occupied = false;
+        for (const auto& c : groups[g]) if (w.camp_tiles.is_set(c.spawn_position())) { occupied = true; break; }
+        if (occupied) { known[g].state = 1; known[g].round = w.round; continue; }
         // Non-target groups are refreshed every third round to bound the cost on dense maps.
         if (static_cast<int>(g) != target && (w.round + g) % 3 != 0 && known[g].round + 3 > w.round) continue;
         try {
@@ -224,17 +238,24 @@ bool Bot::step_towards(const bitboard& goals_in, bool allow_dash) {
     if (goals.is_set(w.pos)) return true;
     if (!w.can_move() || goals.is_empty()) return false;
     auto& me = cambc::self();
-    static distance_field field;
+    distance_field& field = path_field;
     static bitboard visited, origin;
-    origin.clear(); origin.set(w.pos);
-    field.compute_to(w.blocked, goals, origin, visited);
-    std::uint16_t here = field.get(w.pos);
+    std::uint16_t here = distance_field::unreachable;
+    // Reuse the last field for a few rounds when the goal set is unchanged (the local step still
+    // avoids currently blocked tiles); recompute when stale or when we fell off the field.
+    if (path_round + 6 > w.round && path_goals == goals_in) here = field.get(w.pos);
     if (here == distance_field::unreachable) {
-        // Units may be blocking the corridor: plan through them and let the local step avoid them.
-        const bitboard loose = terrain & ~goals;
-        field.compute_to(loose, goals, origin, visited);
+        origin.clear(); origin.set(w.pos);
+        field.compute_to(w.blocked, goals, origin, visited);
         here = field.get(w.pos);
-        if (here == distance_field::unreachable) return false;
+        if (here == distance_field::unreachable) {
+            // Units may be blocking the corridor: plan through them and let the local step avoid them.
+            const bitboard loose = terrain & ~goals;
+            field.compute_to(loose, goals, origin, visited);
+            here = field.get(w.pos);
+            if (here == distance_field::unreachable) { path_round = 0; return false; }
+        }
+        path_goals = goals_in; path_round = w.round;
     }
     // Dash first when the goal is far and the dash is ready.
     if (allow_dash && ab_dash >= 0 && here >= 3 && w.can_cast() && !w.restr.contains(buff_restrictions::cast)) {
@@ -265,6 +286,11 @@ bool Bot::step_towards(const bitboard& goals_in, bool allow_dash) {
     return false;
 }
 
+const distance_field& Bot::home_field() {
+    if (!f_home_ready) { bitboard visited; f_home.compute(terrain, spawn, visited); f_home_ready = true; }
+    return f_home;
+}
+
 bool Bot::in_danger_from_champions() const {
     if (w.hp > 0.35f * w.maxhp) return false;
     for (const auto& e : w.enemies) if (cheb(e.position(), w.pos) <= 4) return true;
@@ -276,7 +302,7 @@ bool Bot::step_away_from_threats() {
     if (!w.can_move()) return false;
     vec2 best = w.pos; float best_score = -1e9f;
     for (auto t : w.blocked.reachable_tiles(w.pos, 1).positions()) {
-        float score = -static_cast<float>(f_home.get(t));
+        float score = -static_cast<float>(home_field().get(t));
         int nearest = 99;
         for (const auto& e : w.enemies) nearest = std::min(nearest, cheb(e.position(), t));
         score += 3.0f * nearest;
@@ -510,17 +536,19 @@ bool Bot::target_available(int g, int travel) const {
 
 int Bot::pick_target() {
     if (!fuel_ok(FUEL_OPTIONAL)) return -1;
+    if (w.round < next_pick_round) return -1;
     const std::uint64_t pf = fuel();
     struct Done { Bot* b; std::uint64_t pf; ~Done() { b->prof[4] = std::max(b->prof[4], pf - fuel()); } } done{this, pf};
     static distance_field field; static bitboard visited, origin;
     origin.clear(); origin.set(w.pos);
     field.compute(terrain, origin, visited);
+    prof[7] = std::max(prof[7], pf - fuel());
     const int my_squad = squad_of_slot(slot);
     // Squad composition (alive members) for feasibility.
     float dps = 0, poke = 0, tank_hp = 0, stun8 = 0, shield8 = 0; bool melee = false;
     for (std::size_t s = 0; s < allies.size(); ++s) {
         if (squad_of_slot(static_cast<int>(s)) != my_squad) continue;
-        if (static_cast<int>(s) != slot && !allies[s].is_alive()) continue;
+        if (!ally_alive[s]) continue;
         if (static_cast<int>(s) != slot && claims[s].phase == PH_DELIVER) continue;
         const Body& b = ally_body[s];
         dps += b.dps(); poke += b.poke; stun8 += b.stun8;
@@ -528,18 +556,26 @@ int Bot::pick_target() {
     }
     const float gw = (plan_ok ? plan.gold_weight_pct : 30) / 100.0f;
     int best = -1; float best_score = 0;
+    static bool dbg_done = false;
     for (std::size_t g = 0; g < groups.size(); ++g) {
+        const std::uint64_t d0 = fuel();
         int travel = 65535;
         for (const auto& c : groups[g]) travel = std::min<int>(travel, field.get(c.spawn_position()));
+        const std::uint64_t d1 = fuel();
         if (travel >= 60000) continue;
         if (!target_available(static_cast<int>(g), travel)) continue;
+        const std::uint64_t d2 = fuel();
+        if (!dbg_done && g == 5) { dbg_done = true; std::printf("pickdbg get=%llu avail=%llu\n", (unsigned long long)(d0 - d1), (unsigned long long)(d1 - d2)); }
         bool other_squad = false;
         for (std::size_t s = 0; s < allies.size() && s < 8; ++s) {
             if (static_cast<int>(s) == slot || squad_of_slot(static_cast<int>(s)) == my_squad) continue;
-            if (claims[s].group == g && (claims[s].phase == PH_CLEAR || claims[s].phase == PH_CAPTURE) && allies[s].is_alive()) other_squad = true;
+            if (claims[s].group == g && (claims[s].phase == PH_CLEAR || claims[s].phase == PH_CAPTURE) && ally_alive[s]) other_squad = true;
         }
         if (other_squad) continue;
+        const std::uint64_t d3 = fuel();
         const Fight f = estimate_fight(ghp[g], gdanger[g], gdmax[g], dps, poke, melee, tank_hp, stun8, shield8);
+        const std::uint64_t d4 = fuel();
+        if (g == 5) std::printf("pickdbg squadloop=%llu fight=%llu\n", (unsigned long long)(d2 - d3), (unsigned long long)(d3 - d4));
         if (!f.feasible) continue;
         float value = ggems[g] + gw * ggold[g];
         if (plan_ok) {
@@ -552,7 +588,9 @@ int Bot::pick_target() {
         const float cyc = travel + wait + f.rounds + 6 + 0.5f * (dist_altar + ggems[g] / 10.0f);
         const float score = value / cyc;
         if (score > best_score) { best_score = score; best = static_cast<int>(g); }
+        if (g == 5) std::printf("pickdbg rest=%llu\n", (unsigned long long)(d2 - fuel()));
     }
+    if (best < 0) next_pick_round = w.round + 4;
     return best;
 }
 
@@ -584,7 +622,7 @@ void Bot::engage_group(int g) {
     // Claimants (squad mates working on this group) and present power.
     std::vector<int> claimants{ slot };
     for (std::size_t s = 0; s < allies.size() && s < 8; ++s) {
-        if (static_cast<int>(s) == slot || claims[s].group != g || claims[s].phase != PH_CLEAR || !allies[s].is_alive()) continue;
+        if (static_cast<int>(s) == slot || claims[s].group != g || claims[s].phase != PH_CLEAR || !ally_alive[s]) continue;
         claimants.push_back(static_cast<int>(s));
     }
     // The opener is the present melee claimant with the most health (it takes the aggro).
@@ -711,7 +749,7 @@ void Bot::farm() {
     for (std::size_t s = 0; s < allies.size() && s < 8; ++s) {
         if (squad_of_slot(static_cast<int>(s)) != my_squad) continue;
         if (claims[s].group == NO_GROUP || (claims[s].phase != PH_CLEAR && claims[s].phase != PH_CAPTURE)) continue;
-        if (static_cast<int>(s) != slot && !allies[s].is_alive()) continue;
+        if (!ally_alive[s]) continue;
         const int r = rank_of_slot(static_cast<int>(s));
         if (r < leader_rank || (r == leader_rank && static_cast<int>(s) < leader)) { leader_rank = r; leader = static_cast<int>(s); }
     }
@@ -773,7 +811,7 @@ void Bot::play_turn() {
 #endif
     if (have_prev && w.round > prev_round + 1) ++susp;
     prev_round = w.round; have_prev = true;
-    if (!init_done) init();
+    if (!init_done) { init(); if (!fuel_ok(70000)) return; }
     auto& me = cambc::self();
     my_claim = { NO_GROUP, PH_IDLE };
     if (!me.is_alive()) { shop(); mode = Mode::RECOVER; delivering = false; recovering = false; drop_target(); return; }

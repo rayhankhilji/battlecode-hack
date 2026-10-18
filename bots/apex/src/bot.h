@@ -109,7 +109,12 @@ private:
     bitboard altar_goals;
     bitboard terrain;      // walls | holes | altars | enemy spawn
     bitboard spawn;
-    distance_field f_home; // distance to our spawn
+    distance_field f_home; // distance to our spawn (lazy)
+    bool f_home_ready{};
+    const distance_field& home_field();
+    distance_field path_field; bitboard path_goals; std::uint32_t path_round{};
+    std::vector<std::uint8_t> ally_alive;
+    std::uint32_t next_pick_round{};
     std::vector<cambc::champion> allies;
     std::vector<Body> ally_body;
     std::vector<std::uint8_t> ally_slotplan; // index into plan.s or 255

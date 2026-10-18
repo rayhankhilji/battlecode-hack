@@ -29,7 +29,12 @@ constexpr std::uint64_t FUEL_OPTIONAL = 35000;     // skip optional work below t
 inline std::uint64_t fuel() { return cambc::fuel_remaining(); }
 inline bool fuel_ok(std::uint64_t need = FUEL_RESERVE) { return fuel() >= need; }
 
-inline int cheb(vec2 a, vec2 b) { return static_cast<int>(a.chebyshev_distance(b)); }
+// 32-bit Chebyshev distance (vec2::chebyshev_distance uses 64-bit arithmetic, ~23 fuel).
+inline int cheb(vec2 a, vec2 b) {
+    const int dx = a.x > b.x ? a.x - b.x : b.x - a.x;
+    const int dy = a.y > b.y ? a.y - b.y : b.y - a.y;
+    return dx > dy ? dx : dy;
+}
 
 // Roles used by the plan and the play state machine.
 enum Role : std::uint8_t { ROLE_TANK = 0, ROLE_DPS = 1, ROLE_CASTER = 2 };
