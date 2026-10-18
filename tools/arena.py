@@ -206,11 +206,11 @@ def analyse(m: Match, bot_a: Path, bot_b: Path) -> dict:
         rec["result"] = {"A": "win", "B": "loss"}.get(rec["winner"], "draw")
         rec["A"], rec["B"] = va, vb
     if m.replay.exists():
-        sizes = {}
+        layouts = {}
         if rec["A"]:
-            sizes = {"a": len((rec["A"] if m.side == "A" else rec["B"])["draft"]) or None,
-                     "b": len((rec["B"] if m.side == "A" else rec["A"])["draft"]) or None}
-        rp = replaylib.inspect_replay(m.replay, sizes)
+            for team, bot in (("a", "A" if m.side == "A" else "B"), ("b", "B" if m.side == "A" else "A")):
+                layouts[team] = (rec[bot]["picks"] or None, rec[bot]["bodies"] or None)
+        rp = replaylib.inspect_replay(m.replay, layouts)
         if rp.get("ok"):
             for bot, team in (("A", "a" if m.side == "A" else "b"), ("B", "b" if m.side == "A" else "a")):
                 side_info = rp[team]
@@ -321,6 +321,7 @@ def main() -> None:
     ap.add_argument("--fuel", type=int, default=0, help="override fuel quantum per turn")
     ap.add_argument("--backend", default="batch", choices=["batch", "run"], help="cambc run-batch (default) or a thread pool of cambc run")
     ap.add_argument("--fail-on-suspend", action="store_true", help="also exit 3 if BOT_A had any fuel suspension")
+    ap.add_argument("--analyse-only", action="store_true", help="do not play: re-parse the outputs already in --out")
     args = ap.parse_args()
 
     cambc = which_cambc()
@@ -333,18 +334,27 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     out = out.resolve()
 
-    if not args.no_build:
-        for b in (bot_a, bot_b):
-            build(cambc, b)
     matches = [Match(mp, side, bot_a, bot_b, out) for mp in maps for side in sides]
-    for m in matches:
-        m.clean()  # run-batch refuses to run if any output path already exists
-    print(f"{len(matches)} matches ({len(maps)} maps x sides {sides}), --jobs {args.jobs}, {args.backend} backend, out {out}")
-
-    t0 = time.time()
-    backend = run_batch_backend if args.backend == "batch" else run_pool_backend
-    rc = backend(cambc, matches, args, out)
-    wall = time.time() - t0
+    if args.analyse_only:
+        rc, wall = 0, 0.0
+        try:  # keep the timing of the run that produced these files
+            prev = json.loads((out / "summary.json").read_text())["summary"]
+            wall, args.jobs, args.backend, rc = prev["wall_seconds"], prev["jobs"], prev["backend"], prev.get("runner_exit", 0)
+        except (OSError, ValueError, KeyError):
+            pass
+        for m in matches:
+            m.status = "ok" if m.stats.exists() else "missing"
+    else:
+        if not args.no_build:
+            for b in (bot_a, bot_b):
+                build(cambc, b)
+        for m in matches:
+            m.clean()  # run-batch refuses to run if any output path already exists
+        print(f"{len(matches)} matches ({len(maps)} maps x sides {sides}), --jobs {args.jobs}, {args.backend} backend, out {out}")
+        t0 = time.time()
+        backend = run_batch_backend if args.backend == "batch" else run_pool_backend
+        rc = backend(cambc, matches, args, out)
+        wall = time.time() - t0
 
     records = [analyse(m, bot_a, bot_b) for m in matches]
     summary = summarise(records, bot_a, bot_b, wall, args)

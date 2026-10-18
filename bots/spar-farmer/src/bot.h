@@ -9,6 +9,7 @@ enum class Role { farm, hunt, lock };
 struct Group {
     cambc::map::camp_group group;
     cambc::bitboard spawns;
+    std::vector<cambc::vec2> tiles;
     cambc::vec2 centre{};
     int gems = 0, gold = 0, size = 0;
     float hp = 0, dps = 0;
@@ -94,6 +95,7 @@ private:
     void do_lock();
     bool bank_gems(bool force);
     bool choose_target();
-    bool target_viable(const Group& g, bool relaxed) const;
+    bool target_viable(const Group& g, bool relaxed, float dpr) const;
+    float my_dpr() const;
     void act_on_target();
 };

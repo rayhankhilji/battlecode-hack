@@ -56,20 +56,46 @@ def parse_fuel_file(data: bytes) -> dict:
             "play_first": block[2], "play": block[3]}
 
 
-def fuel_summary(fuel: dict, team_size: int | None) -> dict:
-    """Per-champion fuel usage. team_size=None tries 5,4,3 and picks the best fit."""
+def _layout_guess(recs: tuple, fuel: dict, fixed_picks: int | None = None) -> tuple[int, int]:
+    """Guess (picks, bodies) without a roster: picks draft records come first, then `bodies`
+    records per round (bodies = picks, or picks+1 when Cassi & Issac was drafted). Prefer a
+    layout whose first play round looks like first turns (bigger quantum) and whose round
+    count is legal (<= 2000), then the smallest partial-round remainder."""
+    n, q_play = len(recs), fuel["play"]
+    best = None
+    for picks in ((fixed_picks,) if fixed_picks else (5, 4, 3)):
+        for bodies in (picks + 1, picks):
+            rounds, rem = divmod(n - picks, bodies)
+            if rounds < 1 or rounds > 2000:
+                continue
+            first = recs[picks:picks + bodies]
+            later = recs[picks + bodies:picks + bodies * 20] or first
+            # First play turns are heavy (2x quantum, static init): either every one exceeds
+            # the normal quantum, or every one is 1.5x heavier than any of the next 20 rounds.
+            strong = all(u > q_play for u in first) or min(first) > 1.5 * max(later)
+            next_ok = picks + bodies >= n or recs[picks + bodies] <= q_play  # block not cut short
+            weak = sum(first) / len(first) > 1.5 * sum(later) / len(later)
+            key = (strong, next_ok, weak, -rem, bodies)
+            if best is None or key > best[0]:
+                best = (key, picks, bodies)
+    return (best[1], best[2]) if best else (fixed_picks or 5, fixed_picks or 5)
+
+
+def fuel_summary(fuel: dict, picks: int | None = None, bodies: int | None = None) -> dict:
+    """Per-champion-body fuel usage. picks = draft picks (draft records), bodies = champion
+    bodies per round (picks + 1 if Cassi & Issac). Both guessed when None."""
     recs = fuel.get("records", ())
     if not fuel.get("ok") or not recs:
         return {"ok": False}
-    if team_size is None:
-        # Draft records come first (team_size of them); a partial final round may leave
-        # up to team_size-1 extra records, so pick the size with the smallest remainder.
-        team_size = min((5, 4, 3), key=lambda k: ((len(recs) - k) % k, -k))
-    draft, play = recs[:team_size], recs[team_size:]
+    guessed = picks is None or bodies is None
+    if guessed:
+        gp, gb = _layout_guess(recs, fuel, picks)
+        picks, bodies = picks or gp, bodies or gb
+    draft, play = recs[:picks], recs[picks:]
     q_play, q_first = fuel["play"], fuel["play_first"]
     champs = []
-    for c in range(team_size):
-        turns = play[c::team_size]
+    for c in range(bodies):
+        turns = play[c::bodies]
         if not turns:
             continue
         suspended = sum(1 for i, u in enumerate(turns) if u >= (q_first if i == 0 else q_play))
@@ -79,11 +105,12 @@ def fuel_summary(fuel: dict, team_size: int | None) -> dict:
             "first_turn_used": turns[0], "max_used": max(later), "mean_used": sum(later) / len(later),
             "min_remaining": q_play - max(later),
         })
-    return {"ok": True, "team_size": team_size, "quantum": q_play, "quantum_first": q_first,
+    return {"ok": True, "picks": picks, "bodies": bodies, "layout_guessed": guessed,
+            "quantum": q_play, "quantum_first": q_first,
             "draft_used": list(draft), "draft_quantum": fuel["draft_first"],
             "draft_suspended": sum(1 for i, u in enumerate(draft)
                                    if u >= (fuel["draft_first"] if i == 0 else fuel["draft"])),
-            "champions": champs, "rounds": len(play) // team_size}
+            "champions": champs, "rounds": len(play) // bodies}
 
 
 def scan_stdout(text: str) -> dict:
@@ -95,8 +122,8 @@ def scan_stdout(text: str) -> dict:
             "bot_error_samples": sorted(set(l.strip() for l in errors))[:5]}
 
 
-def inspect_replay(path: str | Path, team_sizes: dict | None = None) -> dict:
-    """Summarise both teams' streams and fuel logs. team_sizes: {'a': n, 'b': n} or None."""
+def inspect_replay(path: str | Path, layouts: dict | None = None) -> dict:
+    """Summarise both teams' streams and fuel logs. layouts: {'a': (picks, bodies), 'b': ...} or None."""
     out = {"path": str(path), "ok": True}
     try:
         with zipfile.ZipFile(path) as bundle:
@@ -105,7 +132,7 @@ def inspect_replay(path: str | Path, team_sizes: dict | None = None) -> dict:
                 info["stderr_lines"] = len(read_stream(bundle, team, "stderr").splitlines())
                 info["debug_lines"] = len(read_stream(bundle, team, "debug").splitlines())
                 raw = bundle.read(f"team-{team}.fuel") if f"team-{team}.fuel" in bundle.namelist() else b""
-                info["fuel"] = fuel_summary(parse_fuel_file(raw), (team_sizes or {}).get(team))
+                info["fuel"] = fuel_summary(parse_fuel_file(raw), *((layouts or {}).get(team) or (None, None)))
                 out[team] = info
     except (zipfile.BadZipFile, OSError) as e:
         out["ok"] = False
@@ -152,7 +179,9 @@ def stats_team_view(stats: dict, team: str) -> dict:
             susp += n
             susp_rounds.update(en["timestamp"]["round"] for en in e["entries"] if "timestamp" in en)
     draft = [d["champion"] for d in stats.get("roster", {}).get("draft", []) if d.get("team") == team]
+    bodies = sum(1 for c in stats.get("roster", {}).get("champions", []) if c.get("team") == team)
     return {
+        "picks": len(draft), "bodies": bodies or len(champs),
         "gems": num(team_row.get("submittedGems", agg["submittedGems"])),
         "faults": num(stats.get("diagnostics", {}).get("botFaults", {}).get(team, 0)),
         "suspensions": susp, "draft_suspensions": draft_susp,

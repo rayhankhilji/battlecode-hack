@@ -88,6 +88,7 @@ void Bot::init() {
 
     for (const auto& g : cambc::map::camp_groups()) {
         Group info{g, g.spawn_tiles()};
+        info.tiles = info.spawns.positions();
         info.centre = centre_of(info.spawns);
         info.gems = static_cast<int>(g.gem_value());
         info.gold = static_cast<int>(g.gold_value());
@@ -239,6 +240,13 @@ bool Bot::step_towards(const cambc::bitboard& goals_in) {
         return false;
     }
     std::sort(cand.begin(), cand.begin() + n, [](const auto& a, const auto& b) { return a.first < b.first; });
+#ifdef SPAR_TRACE
+    if (slot == 0 && round >= 100 && round < 106) {
+        std::printf("trace r=%u pos=%d,%d here=%u n=%d:", (unsigned)round, pos.x, pos.y, (unsigned)here, n);
+        for (int i = 0; i < n; ++i) std::printf(" (%d,%d)=%u", cand[i].second.x, cand[i].second.y, (unsigned)cand[i].first);
+        std::printf(" goals=%u tgt=%d\n", goals.count(), target);
+    }
+#endif
     for (int i = 0; i < n && i < 3; ++i)
         if (me.move_absolute(cand[i].second)) return true;  // false = hidden blocker; try the next
     return false;
@@ -466,21 +474,25 @@ bool Bot::bank_gems(bool force) {
 
 // ---------------------------------------------------------------- farming
 
-bool Bot::target_viable(const Group& g, bool relaxed) const {
-    if (g.monolith) return false;
-    if (g.blocked_until > round) return false;
-    if (g.gems == 0 && !relaxed) return false;
-    // Rough damage race: rounds to clear vs damage taken while all members are awake.
+float Bot::my_dpr() const {
     auto& me = cambc::self();
-    float dpr = me.strength();
+    const float str = me.strength();
+    float dpr = str;
     for (const auto& ab : me.abilities()) {
         if (!ab.info()) continue;
-        if (ab.is_attack_reset()) dpr += me.strength() / 8.0f;
+        if (ab.is_attack_reset()) dpr += str / 8.0f;
         else if (ab.is_damage() || ab.is_aoe_damage() || ab.is_cc()) {
             try { dpr += ab.damage_amount() / 8.0f; } catch (...) {}
         }
     }
-    if (dpr < 1) dpr = 1;
+    return dpr < 1 ? 1 : dpr;
+}
+
+bool Bot::target_viable(const Group& g, bool relaxed, float dpr) const {
+    if (g.monolith) return false;
+    if (g.blocked_until > round) return false;
+    if (g.gems == 0 && !relaxed) return false;
+    // Rough damage race: rounds to clear vs damage taken while the members are awake.
     const float rounds = g.hp / dpr;
     const float damage = g.dps * rounds * 0.6f;
     const float budget = relaxed ? max_hp * 1.2f : hp * 0.8f;
@@ -493,20 +505,39 @@ bool Bot::choose_target() {
     // Pass 2: rally: any non-monolith group, nearest to our spawn and to us.
     int best = -1;
     float best_score = 1e9f;
+    // Claims of the other slots, read once.
+    int claim_of[8];
+    for (int s = 0; s < 8; ++s) claim_of[s] = s == slot ? -1 : read_claim(s);
+    const float dpr = my_dpr();
+    // True walking distances over terrain (camps and units ignored) from our tile.
+    cambc::distance_field dist;
+    {
+        cambc::bitboard visited, origin;
+        origin.clear();
+        origin.set(pos);
+        dist.compute(terrain, origin, visited);
+    }
+    std::vector<vec2> enemy_pos;
+    for (const auto& e : enemies) enemy_pos.push_back(e.position());
     for (int pass = 0; pass < 3 && best < 0; ++pass) {
         for (std::size_t i = 0; i < groups.size(); ++i) {
             if (low_fuel()) break;
-            const auto& g = groups[i];
+            auto& g = groups[i];
             if (g.monolith || g.blocked_until > round) continue;
+            std::uint16_t d = cambc::distance_field::unreachable;
+            for (auto t : g.tiles) d = std::min(d, dist.get(t));
+            if (d == cambc::distance_field::unreachable) {
+                g.blocked_until = round + 300;  // sealed off (holes/walls); try again much later
+                continue;
+            }
             int claims = 0;
-            for (int s = 0; s < 8; ++s)
-                if (s != slot && read_claim(s) == static_cast<int>(i)) ++claims;
+            for (int s = 0; s < 8; ++s) if (claim_of[s] == static_cast<int>(i)) ++claims;
             bool enemy_there = false;
-            for (const auto& e : enemies) if (cheb(e.position(), g.centre) <= 2) enemy_there = true;
+            for (auto ep : enemy_pos) if (cheb(ep, g.centre) <= 2) enemy_there = true;
             if (enemy_there && pass < 2) continue;
-            float score = static_cast<float>(cheb(g.centre, pos));
+            float score = static_cast<float>(d);
             if (pass == 0) {
-                if (g.gems == 0 || claims > 0 || !target_viable(g, false)) continue;
+                if (g.gems == 0 || claims > 0 || !target_viable(g, false, dpr)) continue;
                 bool ally_there = false;
                 for (const auto& a : allies)
                     if (!(a == cambc::self()) && cheb(a.position(), g.centre) <= 2) ally_there = true;
@@ -520,11 +551,12 @@ bool Bot::choose_target() {
             } else if (pass == 1) {
                 if (claims == 0) continue;
                 score -= claims * 4;
-                if (g.gems == 0) score += 20;
+                if (g.gems == 0) score += 40;
             } else {
+                // Rally: everyone scores from the spawn so the first picks agree.
                 score += static_cast<float>(cheb(g.centre, ally_spawn_centre));
-                if (g.gems == 0) score += 20;
-                score += g.dps * 0.05f;
+                if (g.gems == 0) score += 40;
+                score += g.dps * 0.05f - std::min(g.gems, 100) * 0.3f;
             }
             if (score < best_score) { best_score = score; best = static_cast<int>(i); }
         }
@@ -583,6 +615,30 @@ void Bot::act_on_target() {
     // Shield up when the group can hurt us.
     if (g.dps > 0 && nearest <= 3 && hp < max_hp * 0.7f) try_shield();
 
+    // Ranged champions only close to basic-attack range of a biting group once a melee ally is
+    // engaged (monsters hit the nearest champion). Otherwise hold at spell range 4, outside range 3.
+    if (ranged && g.dps > 0) {
+        bool melee_engaged = false;
+        for (const auto& a : allies) {
+            if (a == cambc::self()) continue;
+            for (auto c : living) if (cheb(a.position(), c->position()) <= 1) melee_engaged = true;
+        }
+        if (!melee_engaged) {
+            if (nearest <= 3) {
+                std::vector<vec2> threats;
+                for (auto c : living) threats.push_back(c->position());
+                if (step_away_from(threats)) return;
+            }
+            if (nearest <= 4) { cast_on_camps(living, true); return; }
+            cambc::bitboard goals;
+            goals.clear();
+            for (auto c : living) goals |= ring(c->position(), 4);
+            for (auto c : living) goals &= ~ring(c->position(), 3);
+            step_towards(goals);
+            return;
+        }
+    }
+
     if (in_attack_range) {
         attack_camp_in_range(living);
         cast_on_camps(living, true);
@@ -615,7 +671,7 @@ void Bot::act_on_target() {
 
 void Bot::do_farm() {
     auto& me = cambc::self();
-    if (want_recall(RECALL_FRACTION)) return;
+    if (want_recall(ranged ? RECALL_FRACTION + 0.1f : RECALL_FRACTION)) return;
 
     // Enemy in reach: trade hits (melee keeps farming afterwards; ranged spends the attack).
     const cambc::champion* adjacent = nullptr;

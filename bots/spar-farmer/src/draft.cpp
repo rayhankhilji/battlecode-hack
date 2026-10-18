@@ -1,4 +1,3 @@
-#define SPAR_MAPDUMP 1
 // Meta draft: Cassi & Issac, Stellar, Ren, Varg, Ryth (prefix by team size), then fallbacks.
 #include <cambc.h>
 #include "draft.h"

@@ -2,7 +2,7 @@
 """Inspect a cambc replay bundle: team stdout/stderr/debug, engine fuel log, bot telemetry.
 
     telemetry.py REPLAY.repl26a [--team a|b|both] [--raw] [--dump DIR] [--grep REGEX]
-                                [--tail N] [--team-size N] [--stats STATS.json]
+                                [--tail N] [--picks N] [--bodies N] [--stats STATS.json]
 
 Default: per-team summary (stream sizes, 'bot error' lines, engine fuel log per champion
 slot, and a digest of telemetry lines). Telemetry lines are any lines containing key=value
@@ -78,7 +78,7 @@ def parse_telemetry(text: str, grep: re.Pattern | None) -> OrderedDict:
     return groups
 
 
-def print_team(team: str, bundle: zipfile.ZipFile, args, team_size: int | None) -> None:
+def print_team(team: str, bundle: zipfile.ZipFile, args, layout: tuple) -> None:
     stdout = replaylib.read_stream(bundle, team, "stdout")
     stderr = replaylib.read_stream(bundle, team, "stderr")
     debug = replaylib.read_stream(bundle, team, "debug")
@@ -89,9 +89,10 @@ def print_team(team: str, bundle: zipfile.ZipFile, args, team_size: int | None) 
         print(f"    e.g. {s[:120]}")
 
     name = f"team-{team}.fuel"
-    fuel = replaylib.fuel_summary(replaylib.parse_fuel_file(bundle.read(name)) if name in bundle.namelist() else {}, team_size)
+    fuel = replaylib.fuel_summary(replaylib.parse_fuel_file(bundle.read(name)) if name in bundle.namelist() else {}, *layout)
     if fuel.get("ok"):
-        print(f"  engine fuel log: quantum {fuel['quantum']} (first turn {fuel['quantum_first']}), team size {fuel['team_size']}, "
+        print(f"  engine fuel log: quantum {fuel['quantum']} (first turn {fuel['quantum_first']}), {fuel['picks']} picks / {fuel['bodies']} bodies"
+              f"{' (guessed; pass --picks/--bodies or --stats)' if fuel['layout_guessed'] else ''}, "
               f"{fuel['rounds']} rounds; draft turns used {fuel['draft_used']} (quantum {fuel['draft_quantum']}, suspended {fuel['draft_suspended']})")
         print(f"  {'slot':<5}{'turns':>6}{'suspended':>10}{'first_used':>11}{'max_used':>10}{'mean_used':>10}{'min_remaining':>14}")
         for c in fuel["champions"]:
@@ -135,7 +136,8 @@ def main() -> None:
     ap.add_argument("--tail", type=int, default=0, help="print only the last N lines of each stream")
     ap.add_argument("--grep", default=None, help="regex filter for telemetry lines and --raw/--tail output")
     ap.add_argument("--dump", default=None, help="write team-X.{stdout,stderr,debug} (NUL-stripped) to this dir")
-    ap.add_argument("--team-size", type=int, default=None, help="champions per team for the fuel log (default: auto, or from --stats)")
+    ap.add_argument("--picks", type=int, default=None, help="draft picks per team for the fuel log (default: from --stats, else guessed)")
+    ap.add_argument("--bodies", type=int, default=None, help="champion bodies per team (picks + 1 with Cassi & Issac; default as --picks)")
     ap.add_argument("--stats", default=None, help="matching statistics JSON (default: <replay stem>.json if it exists)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -149,15 +151,14 @@ def main() -> None:
     except zipfile.BadZipFile as e:
         sys.exit(f"telemetry: {path} is not a replay bundle: {e}")
 
-    sizes = {"a": args.team_size, "b": args.team_size}
+    sizes = {"a": (args.picks, args.bodies), "b": (args.picks, args.bodies)}
     stats_path = Path(args.stats) if args.stats else path.with_suffix(".json")
-    if args.team_size is None and stats_path.exists():
+    if args.picks is None and stats_path.exists():
         try:
             st = replaylib.load_stats(stats_path)
-            for team, key in (("a", "teamA"), ("b", "teamB")):
-                n = sum(1 for d in st.get("roster", {}).get("draft", []) if d.get("team") == key)
-                sizes[team] = n or None
             view = {k: replaylib.stats_team_view(st, v) for k, v in (("A", "teamA"), ("B", "teamB"))}
+            sizes = {"a": (view["A"]["picks"] or None, view["A"]["bodies"] or None),
+                     "b": (view["B"]["picks"] or None, view["B"]["bodies"] or None)}
             print(f"stats {stats_path.name}: outcome {st['match'].get('outcome')} after {st['match'].get('roundsStarted')} rounds; "
                   + "; ".join(f"{k}: gems {v['gems']} faults {v['faults']} suspensions {v['suspensions']}"
                               f"{' (draft ' + str(v['draft_suspensions']) + ')' if v['draft_suspensions'] else ''}"
