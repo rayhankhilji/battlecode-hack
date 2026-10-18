@@ -29,8 +29,10 @@ mkdir -p "$OUT"
 cambc build "$BOT" --release >"$OUT/build.log" 2>&1 || { tail -20 "$OUT/build.log"; echo "gate: build failed for $BOT" >&2; exit 4; }
 
 FAIL=0
+BOT_ABS="$(cd "$BOT" && pwd)"
 for OPP in starter-cpp starter-python; do
   echo "=== $NAME vs $OPP ==="
+  if [ "$BOT_ABS" = "$ROOT/bots/$OPP" ]; then echo "skipped: candidate is $OPP itself"; echo; continue; fi
   # Candidate already built; --no-build would skip the opponent too, so let arena build both
   # (a no-op rebuild of the candidate costs well under a second).
   python3 "$ROOT/tools/arena.py" "$BOT" "$ROOT/bots/$OPP" --maps "$MAPS" --sides both --jobs "$JOBS" --out "$OUT/$OPP" \

@@ -39,14 +39,16 @@ tools/arena.py BOT_A BOT_B [--maps all|elkring,ambush] [--sides both|a|b] [--job
   statistics are written**, so the row shows `result=truncated` with no gems/winner (not an error).
   Use it only for smoke/fuel tests; the replay is still written and `telemetry.py` can read it.
 - `--backend run` uses a thread pool of `cambc run` processes instead of `run-batch` (fallback only;
-  see "Backend choice").
+  see "Backend choice" — it is 2x slower and races on builds).
+- `--analyse-only` re-parses an existing `--out` dir (same BOT_A/BOT_B/maps/sides) without playing,
+  e.g. after changing the parsers; it keeps the recorded wall time.
 
 ### Runtime
 
 Container: 4 cores. One starter-vs-starter match takes 12–20 s wall but ~2.5 cores of CPU (the engine
 runs champion instances in parallel), so parallelism saturates around `--jobs 4`; `--jobs 8` is fine
 (the engine just time-slices). Measured for the 34-match panel (17 maps × both sides,
-`starter-cpp` vs `starter-python`, `--jobs 8`): see the "Measured" section at the bottom.
+`starter-cpp` vs `starter-python`, `--jobs 8`): **164 s** (see "Measured" at the bottom).
 Matches against a bot that finishes faster (a real bot wins in ~400–600 rounds) take proportionally less.
 
 ### Backend choice
@@ -58,7 +60,8 @@ names are not resolved like `cambc run --map` does, and bot paths resolve relati
 it refuses to start if any row's replay path already exists, a bot build failure aborts the whole batch
 before any match, and faulted matches still count as "saved" with exit 0 (faults must be read from the
 statistics). The thread-pool fallback (`--backend run`) has to rename the auto-named bundle
-(`<a>-vs-<b>-<ms>.repl26a`) and gives no engine-side timeout; it is kept for debugging only.
+(`<a>-vs-<b>-<ms>.repl26a`), gives no engine-side timeout, was 2.2x slower on the panel, and lost 2 of 34
+matches to a build race (each `cambc run` rebuilds/checks the bot in `.cambc/build`); kept for debugging only.
 
 ## telemetry.py
 
@@ -68,9 +71,11 @@ tools/telemetry.py REPLAY.repl26a [--team a|b|both] [--raw] [--tail N] [--grep R
 ```
 
 Prints, per team: stream sizes, `bot error` line count with samples, the **engine fuel log**
-(per champion slot: turns, suspended turns, first-turn fuel used, max/mean fuel used, min remaining) and
+(per champion body slot: turns, suspended turns, first-turn fuel used, max/mean fuel used, min remaining) and
 a digest of telemetry lines. If `<replay stem>.json` exists next to the replay (arena writes it) the
-outcome, faults, suspensions and drafts are shown too and the team size is taken from the roster.
+outcome, faults, suspensions and drafts are shown too and the fuel-log layout (picks / bodies) is taken from
+the roster; otherwise it is guessed from the heavy first-turn signature (correct on 20/20 starter logs) or
+given with `--picks N --bodies N` (bodies = picks + 1 when Cassi & Issac was drafted).
 
 Telemetry lines are any lines containing `key=value` tokens, e.g.
 `T 300 c=2 role=farm fuel_min=41200 susp=0 gems=120`. Grouping: by a `champ|champion|c|id|name|who|slot`
@@ -103,8 +108,9 @@ in the stream says which champion wrote a line: put a champion id in your teleme
 `team-X.fuel` (decoded in `replaylib.parse_fuel_file`): magic `a62leuf` (7 B), 6 header bytes, 8 × u64 LE
 quanta = (draft first turn, draft turn, play first turn, play turn) for native bots then the same four
 for Python (×25; both blocks appear in both files — pick the one the records fit under), then one u64
-per bot turn = **fuel used**: first `team_size` records are the draft picks, then for each round one
-record per champion (dead champions still get one; order within a round follows turn priority). A record
+per bot turn = **fuel used**: first `picks` records are the draft turns, then for each round one record per
+champion **body** (picks + 1 with Cassi & Issac; dead champions still get one; order within a round follows
+turn priority). A record
 equal to its quantum ⇔ that turn ran out of fuel; totals match the `fuelExhausted` events exactly.
 Defaults seen: draft 1,000,000 / 100,000, play 200,000 (first) / 100,000; Python ×25.
 
@@ -131,8 +137,32 @@ metrics are encoded as **strings** (`"414"`), damage/healing as floats — use `
 `replaylib.stats_team_view(stats, "teamA")` folds this into `{gems, faults, suspensions,
 draft_suspensions, first_suspension_round, draft[], kills, deaths, …}`.
 
-## Measured
+## Measured (18 Oct 2026, this 4-core container, starter-cpp vs starter-python, 17 maps x both seats = 34 matches)
 
-See bottom of this file after each panel run; current numbers:
+| backend | `--jobs` | wall (matches only) | end-to-end (`time arena.py`, incl. builds + analysis) | result |
+|---|---|---|---|---|
+| `run-batch` (default) | 8 | **164.4 s** | 2m53s real, 8m52s user | 34/34 completed, 0 errors, 0 faults |
+| thread pool of `cambc run` | 8 | 357.9 s | 5m59s real | 32/34: **2 matches errored** with corrupted-module reads (`unexpected end-of-file`, `expected at least one module field`) because every `cambc run` process re-checks/builds the bot in `.cambc/build` concurrently |
 
-MEASURED_PLACEHOLDER
+A single starter match: 10–20 s wall, ~2.5 cores. 4 matches at `--jobs 4`: 25 s. So the panel is CPU-bound
+at ~5 matches/minute here; `gate.sh` (two panels) takes ~6 minutes. `cambc build --release`: C++ ~6 s
+(incremental: instant), Python ~8 s.
+
+Engine quirks observed (cambc 2.2.5 / engine 0.0.3):
+
+- `run-batch` manifest: bot and map columns must be absolute paths (bare map names are rejected with
+  "map does not exist"; relative bot paths resolve against the manifest's directory, not cwd).
+- `run-batch` refuses to start if any row's replay path exists ("output already exists"), validates every
+  row and aborts the whole batch (exit 1) before any match on a bad row or a failed build.
+- `run-batch` status lines: `[|] STARTING`, `[+] TEAM A WIN (name)` / `[+] TEAM B WIN (name)` /
+  `[+] TRUNCATED` with `Round NNNN/2000`, `[x] FAILED: timeout (log: <replay>.error.log)`, each followed by an
+  indented `Replay: <path>` line, then `Finished: N replay bundles saved, M failed` and exit 1 + `error: M matches failed`.
+  Faulted or suspended bots do **not** make a match "failed" — read `diagnostics.botFaults` / `fuelExhausted` events.
+- `cambc run` names its bundle `<botA>-vs-<botB>-<unix ms>.repl26a` in `--out-dir`; `run-batch` uses exactly the
+  manifest's path. Statistics JSON is only written for finished matches (not under a `--rounds` cap).
+- `--statistics` integer metrics are strings; `teams[].submittedGems` is the authoritative score.
+- A WASM trap restarts that champion's instance, which then faults again every turn (so `botFaults` is in the
+  thousands for one bug), and unflushed `std::cout` text is lost on the trap.
+- Team stdout inside the bundle has stray NUL bytes; there is no stderr member and `.debug` is empty in release.
+- First play turn gets 200,000 fuel (draft first turn 1,000,000); the starters use 75–120k of it, so a bot that
+  does heavy init on turn 1 is fine up to 2x the normal quantum but not beyond.

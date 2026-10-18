@@ -1,5 +1,6 @@
 // Shared includes, tiny helpers and fuel/log discipline for the apex bot.
 #pragma once
+#define APEX_TRACE 1
 #include <cambc.h>
 #include <algorithm>
 #include <array>

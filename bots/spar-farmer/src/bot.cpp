@@ -15,6 +15,9 @@ using cambc::vec2;
 
 namespace {
 
+#ifndef SPAR_TRACE_SPLIT
+#define SPAR_TRACE_SPLIT 0
+#endif
 constexpr std::uint64_t FUEL_BAIL = 20000;   // skip optional work below this
 constexpr int BANK_AT = 40;                   // gems carried before banking
 constexpr float RECALL_FRACTION = 0.35f;
@@ -86,6 +89,8 @@ void Bot::init() {
     enemy_spawn_centre = centre_of(cambc::map::spawn_region(team::enemy));
     ally_spawn_centre = centre_of(spawn_ally);
 
+    cambc::camp_stats kind_stats[8]{};
+    bool kind_known[8]{};
     for (const auto& g : cambc::map::camp_groups()) {
         Group info{g, g.spawn_tiles()};
         info.tiles = info.spawns.positions();
@@ -93,9 +98,10 @@ void Bot::init() {
         info.gems = static_cast<int>(g.gem_value());
         info.gold = static_cast<int>(g.gold_value());
         for (const auto& c : g.camps()) {
-            const auto st = c.base_stats();
-            info.hp += st.base_health;
-            info.dps += st.base_strength;
+            const int k = static_cast<int>(c.kind());
+            if (!kind_known[k]) { kind_stats[k] = c.base_stats(); kind_known[k] = true; }
+            info.hp += kind_stats[k].base_health;
+            info.dps += kind_stats[k].base_strength;
             info.size++;
             if (c.is_monolith()) info.monolith = true;
         }
@@ -232,10 +238,10 @@ bool Bot::step_towards(const cambc::bitboard& goals_in) {
         const auto gp = goals.positions();
         vec2 best = gp[0];
         for (auto g : gp) if (cheb(g, pos) < cheb(best, pos)) best = g;
-        if (me.move_towards(best)) return true;
+        if (me.move_towards(best)) { pos = me.position(); return true; }
         if (stuck >= 6) {
             for (auto tile : blocked.reachable_tiles(pos, 1).positions())
-                if (tile != pos && (tile.x + tile.y + static_cast<int>(round)) % 3 == 0 && me.move_absolute(tile)) return true;
+                if (tile != pos && (tile.x + tile.y + static_cast<int>(round)) % 3 == 0 && me.move_absolute(tile)) { pos = tile; return true; }
         }
         return false;
     }
@@ -247,8 +253,12 @@ bool Bot::step_towards(const cambc::bitboard& goals_in) {
         std::printf(" goals=%u tgt=%d\n", goals.count(), target);
     }
 #endif
-    for (int i = 0; i < n && i < 3; ++i)
-        if (me.move_absolute(cand[i].second)) return true;  // false = hidden blocker; try the next
+    for (int i = 0; i < n && i < 3; ++i) {
+        if (me.move_absolute(cand[i].second)) { pos = cand[i].second; return true; }  // false = hidden blocker; try the next
+#ifdef SPAR_TRACE
+        std::printf("movefalse r=%u slot=%d to=%d,%d canmove_after=%d\n", (unsigned)round, slot, cand[i].second.x, cand[i].second.y, (int)me.can_move());
+#endif
+    }
     return false;
 }
 
@@ -267,7 +277,9 @@ bool Bot::step_away_from(const std::vector<vec2>& threats) {
         const int s = score(tile);
         if (s > best_score) { best_score = s; best = tile; }
     }
-    return best != pos && me.move_absolute(best);
+    if (best == pos || !me.move_absolute(best)) return false;
+    pos = best;
+    return true;
 }
 
 bool Bot::enemy_within(int range) const {
@@ -509,6 +521,7 @@ bool Bot::choose_target() {
     int claim_of[8];
     for (int s = 0; s < 8; ++s) claim_of[s] = s == slot ? -1 : read_claim(s);
     const float dpr = my_dpr();
+    const bool need_gold = role == Role::lock && cambc::self().gold_count() < cambc::consumable_type::altar_lock.cost();
     // True walking distances over terrain (camps and units ignored) from our tile.
     cambc::distance_field dist;
     {
@@ -524,6 +537,7 @@ bool Bot::choose_target() {
             if (low_fuel()) break;
             auto& g = groups[i];
             if (g.monolith || g.blocked_until > round) continue;
+            if (need_gold && g.gold == 0) continue;
             std::uint16_t d = cambc::distance_field::unreachable;
             for (auto t : g.tiles) d = std::min(d, dist.get(t));
             if (d == cambc::distance_field::unreachable) {
@@ -580,6 +594,10 @@ void Bot::act_on_target() {
     }
     const auto state = g.group.state();
     if (std::holds_alternative<cambc::map::camp_group_respawning>(state)) {
+#ifdef SPAR_TRACE
+        std::printf("cap r=%u slot=%d group=%d respawning timer=%d gems=%u on_tile=%d\n", (unsigned)round, slot, target,
+                    std::get<cambc::map::camp_group_respawning>(state).timer, me.gem_count(), (int)g.spawns.is_set(pos));
+#endif
         g.blocked_until = round + std::get<cambc::map::camp_group_respawning>(state).timer + 1;
         target = -1;
         write_claim(-1);
@@ -587,10 +605,13 @@ void Bot::act_on_target() {
     }
     if (std::holds_alternative<cambc::map::camp_group_reward_available>(state)) {
         // Capture: stand on a spawn tile until the reward arrives (state flips to respawning).
+#ifdef SPAR_TRACE
+        std::printf("cap r=%u slot=%d group=%d reward_available gems=%u on_tile=%d\n", (unsigned)round, slot, target, me.gem_count(), (int)g.spawns.is_set(pos));
+#endif
         if (g.spawns.is_set(pos)) return;
         // An ally already standing on the region captures it; splitting only delays banking.
         for (const auto& a : allies)
-            if (!(a == cambc::self()) && g.spawns.is_set(a.position())) {
+            if (!SPAR_TRACE_SPLIT && !(a == cambc::self()) && g.spawns.is_set(a.position())) {
                 g.blocked_until = round + cambc::constants::capture_time + 3;
                 target = -1;
                 write_claim(-1);
@@ -704,7 +725,8 @@ void Bot::do_farm() {
     probe_start();
     if (target >= 0) act_on_target();
     probe(2);
-    if (target < 0 && me.gem_count() > 0 && !choose_target()) bank_gems(true);
+    // Target just invalidated: re-plan only if the fuel budget still comfortably allows it.
+    if (target < 0 && cambc::fuel_remaining() > 45000 && me.gem_count() > 0 && !choose_target()) bank_gems(true);
 }
 
 // ---------------------------------------------------------------- hunter
@@ -811,9 +833,10 @@ void Bot::do_lock() {
         return;
     }
 
-    // Need a lock and have none: go home to buy one (recall when far, walk when close).
+    // Need a lock and have none: earn the 10 gold by farming, then go home to buy one.
     if (!have_lock && !ours_placed) {
-        if (at_spawn) return;  // shop() already ran this turn; wait for gold
+        if (me.gold_count() < cambc::consumable_type::altar_lock.cost()) { do_farm(); return; }
+        if (at_spawn) return;  // shop() already ran this turn; the lock arrives next turn
         if (cheb(pos, ally_spawn_centre) > 8 && !enemy_within(5) && !awake_camp_within(4)) { me.recall(); return; }
         step_towards(spawn_ally);
         return;
@@ -855,7 +878,11 @@ void Bot::do_lock() {
 // ---------------------------------------------------------------- turn
 
 void Bot::play_turn() {
-    if (!inited) init();
+    if (!inited) {
+        init();
+        // The first turn's doubled budget mostly went into init; do not stack a full turn on it.
+        if (cambc::fuel_remaining() < 60000) return;
+    }
     auto& me = cambc::self();
     round = cambc::round_number();
     if (!me.is_alive()) {
